@@ -1,13 +1,16 @@
 [package]
-name = "calamine"
-version = "0.33.0"
-authors = ["Johann Tuffe <tafia973@gmail.com>"]
-repository = "https://github.com/tafia/calamine"
-documentation = "https://docs.rs/calamine"
-description = "An Excel/OpenDocument Spreadsheet reader and deserializer in pure Rust"
+name = "calamine-styles"
+version = "0.1.0"
+authors = [
+    "Johann Tuffe <tafia973@gmail.com>",
+    "Wolfgang Schoenberger",
+]
+repository = "https://github.com/wolfiesch/calamine"
+documentation = "https://docs.rs/calamine-styles"
+description = "Fork of calamine with Font, Fill, Border, Alignment, and NumberFormat style parsing for xlsx"
 license = "MIT"
 readme = "README.md"
-keywords = ["excel", "ods", "xls", "xlsx", "xlsb"]
+keywords = ["excel", "xlsx", "styles", "calamine", "formatting"]
 categories = ["encoding", "parsing", "text-processing"]
 exclude = ["tests/**/*"]
 edition = "2021"

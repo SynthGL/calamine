@@ -296,14 +296,10 @@ where
                                                 self.formulas.get(shared_index)
                                             {
                                                 if let Some(offset) = offset_map.get(&pos) {
-                                                    if let Ok(offset_formula) =
-                                                        super::replace_cell_names(
-                                                            base_formula,
-                                                            *offset,
-                                                        )
-                                                    {
-                                                        value = Some(offset_formula);
-                                                    }
+                                                    value = Some(super::replace_cell_names(
+                                                        base_formula,
+                                                        *offset,
+                                                    )?);
                                                 }
                                             }
                                         }

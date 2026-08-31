@@ -2042,11 +2042,6 @@ impl<RS: Read + Seek> Xlsx<RS> {
             })
             .collect()
     }
-
-    #[cfg(feature = "picture")]
-    fn pictures(&self) -> Option<Vec<(String, Vec<u8>)>> {
-        self.pictures.to_owned()
-    }
 }
 
 struct TableMetadata {

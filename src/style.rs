@@ -1004,6 +1004,30 @@ struct StyleRun {
     count: u32,
 }
 
+fn push_style_run(runs: &mut Vec<StyleRun>, style_id: u16, mut count: u64) {
+    if count == 0 {
+        return;
+    }
+
+    if let Some(last) = runs.last_mut() {
+        if last.style_id == style_id {
+            let available = u64::from(u32::MAX - last.count);
+            let additional = count.min(available);
+            last.count += additional as u32;
+            count -= additional;
+        }
+    }
+
+    while count > 0 {
+        let chunk = count.min(u64::from(u32::MAX));
+        runs.push(StyleRun {
+            style_id,
+            count: chunk as u32,
+        });
+        count -= chunk;
+    }
+}
+
 /// RLE-compressed style storage for a worksheet range.
 ///
 /// Instead of storing one Style per cell (which wastes memory when many cells
@@ -1041,57 +1065,45 @@ impl StyleRange {
             return Self::empty();
         }
 
-        // Find bounds
         let mut row_start = u32::MAX;
         let mut row_end = 0;
         let mut col_start = u32::MAX;
         let mut col_end = 0;
-        for (r, c, _) in &cells {
-            row_start = row_start.min(*r);
-            row_end = row_end.max(*r);
-            col_start = col_start.min(*c);
-            col_end = col_end.max(*c);
+        for (row, column, _) in &cells {
+            row_start = row_start.min(*row);
+            row_end = row_end.max(*row);
+            col_start = col_start.min(*column);
+            col_end = col_end.max(*column);
         }
 
-        let width = (col_end - col_start + 1) as usize;
-        let height = (row_end - row_start + 1) as usize;
-        let total_cells = (width * height) as u64;
+        let width = u64::from(col_end - col_start + 1);
+        let height = u64::from(row_end - row_start + 1);
+        let total_cells = width * height;
 
-        // Create dense style ID array (temporary)
-        let mut style_ids = vec![0u16; width * height];
-
-        for (r, c, style_id) in cells {
-            let row = (r - row_start) as usize;
-            let col = (c - col_start) as usize;
-            let idx = row * width + col;
-            // style_id is already an index, just need to fit in u16
-            style_ids[idx] = style_id.min(u16::MAX as usize) as u16;
+        // Retain only explicitly styled positions. A BTreeMap preserves row-major
+        // order and gives duplicate positions the same last-write behavior as the
+        // previous dense temporary.
+        let mut sparse_ids = BTreeMap::new();
+        for (row, column, style_id) in cells {
+            let relative_row = u64::from(row - row_start);
+            let relative_column = u64::from(column - col_start);
+            let linear_index = relative_row * width + relative_column;
+            sparse_ids.insert(
+                linear_index,
+                style_id.min(u16::MAX as usize) as u16,
+            );
         }
 
-        // Compress into RLE runs
+        // Construct zero/style runs directly from sparse positions. Large gaps are
+        // split because the wire representation deliberately uses u32 run lengths.
         let mut runs = Vec::new();
-        if !style_ids.is_empty() {
-            let mut current_style = style_ids[0];
-            let mut count = 1u32;
-
-            for &style_id in &style_ids[1..] {
-                if style_id == current_style {
-                    count += 1;
-                } else {
-                    runs.push(StyleRun {
-                        style_id: current_style,
-                        count,
-                    });
-                    current_style = style_id;
-                    count = 1;
-                }
-            }
-            runs.push(StyleRun {
-                style_id: current_style,
-                count,
-            });
+        let mut cursor = 0u64;
+        for (linear_index, style_id) in sparse_ids {
+            push_style_run(&mut runs, 0, linear_index - cursor);
+            push_style_run(&mut runs, style_id, 1);
+            cursor = linear_index + 1;
         }
-
+        push_style_run(&mut runs, 0, total_cells - cursor);
         runs.shrink_to_fit();
 
         StyleRange {
@@ -1111,92 +1123,35 @@ impl StyleRange {
             return Self::empty();
         }
 
-        // Find bounds
-        let mut row_start = u32::MAX;
-        let mut row_end = 0;
-        let mut col_start = u32::MAX;
-        let mut col_end = 0;
-        for (r, c, _) in &cells {
-            row_start = row_start.min(*r);
-            row_end = row_end.max(*r);
-            col_start = col_start.min(*c);
-            col_end = col_end.max(*c);
-        }
+        // Build the compact palette first, then let from_style_ids construct runs
+        // without allocating the full worksheet bounding rectangle.
+        let mut palette: Vec<Style> = vec![Style::default()];
+        let mut style_to_id: std::collections::HashMap<u32, u16> =
+            std::collections::HashMap::new();
+        let mut style_cells = Vec::with_capacity(cells.len());
 
-        let width = (col_end - col_start + 1) as usize;
-        let height = (row_end - row_start + 1) as usize;
-        let total_cells = (width * height) as u64;
-
-        // Build palette and map styles to IDs
-        // Use style_id from Excel if available, otherwise assign sequential IDs
-        let mut palette: Vec<Style> = vec![Style::default()]; // Index 0 = empty/default
-        let mut style_to_id: std::collections::HashMap<u32, u16> = std::collections::HashMap::new();
-
-        // Create dense style ID array (temporary)
-        let mut style_ids = vec![0u16; width * height];
-
-        for (r, c, style) in cells {
-            let row = (r - row_start) as usize;
-            let col = (c - col_start) as usize;
-            let idx = row * width + col;
-
+        for (row, column, style) in cells {
             if style.is_empty() {
-                continue; // Leave as 0
+                style_cells.push((row, column, 0));
+                continue;
             }
 
-            // Use Excel's style_id if available for deduplication
-            // This groups cells with the same formatting together
-            // Fallback uses the next palette ID and does not deduplicate styles
-            // that lack an ID from the source workbook.
+            // Use Excel's style_id if available for deduplication. Styles without
+            // a source ID retain the prior behavior of receiving distinct IDs.
             let excel_style_id = style.style_id.unwrap_or(palette.len() as u32);
-
             let style_id = if let Some(&id) = style_to_id.get(&excel_style_id) {
                 id
             } else {
-                let id = palette.len() as u16;
+                let id = palette.len().min(u16::MAX as usize) as u16;
                 palette.push(style);
                 style_to_id.insert(excel_style_id, id);
                 id
             };
-
-            style_ids[idx] = style_id;
+            style_cells.push((row, column, usize::from(style_id)));
         }
 
-        // Compress into RLE runs
-        let mut runs = Vec::new();
-        if !style_ids.is_empty() {
-            let mut current_style = style_ids[0];
-            let mut count = 1u32;
-
-            for &style_id in &style_ids[1..] {
-                if style_id == current_style {
-                    count += 1;
-                } else {
-                    runs.push(StyleRun {
-                        style_id: current_style,
-                        count,
-                    });
-                    current_style = style_id;
-                    count = 1;
-                }
-            }
-            // Push final run
-            runs.push(StyleRun {
-                style_id: current_style,
-                count,
-            });
-        }
-
-        runs.shrink_to_fit();
         palette.shrink_to_fit();
-
-        StyleRange {
-            start: (row_start, col_start),
-            end: (row_end, col_end),
-            palette,
-            runs,
-            total_cells,
-        }
+        Self::from_style_ids(style_cells, palette)
     }
 
     /// Get the start position of the range
@@ -1251,16 +1206,16 @@ impl StyleRange {
             return None;
         }
 
-        let linear_idx = pos.0 * width + pos.1;
+        let linear_idx = pos.0 as u64 * width as u64 + pos.1 as u64;
         let style_id = self.style_id_at(linear_idx)?;
         self.palette.get(style_id as usize)
     }
 
     /// Get style ID at a linear index using binary search on runs
-    fn style_id_at(&self, linear_idx: usize) -> Option<u16> {
-        let mut offset = 0usize;
+    fn style_id_at(&self, linear_idx: u64) -> Option<u16> {
+        let mut offset = 0u64;
         for run in &self.runs {
-            let run_end = offset + run.count as usize;
+            let run_end = offset + u64::from(run.count);
             if linear_idx < run_end {
                 return Some(run.style_id);
             }
@@ -1476,5 +1431,23 @@ mod tests {
         assert!(!layout.has_custom_dimensions());
         assert_eq!(layout.get_effective_column_width(0), 8.43); // Excel default
         assert_eq!(layout.get_effective_row_height(0), 15.0); // Excel default
+    }
+
+    #[test]
+    fn test_sparse_style_range_avoids_dense_extreme_bounds() {
+        let styled =
+            Style::new().with_font(Font::new().with_name("Endpoint".to_string()));
+        let range = StyleRange::from_style_ids(
+            vec![(0, 0, 1), (1_048_575, 16_383, 1)],
+            vec![Style::default(), styled.clone()],
+        );
+
+        assert_eq!(range.width(), 16_384);
+        assert_eq!(range.height(), 1_048_576);
+        assert_eq!(range.total_cells, 17_179_869_184);
+        assert_eq!(range.run_count(), 7);
+        assert_eq!(range.get((0, 0)), Some(&styled));
+        assert_eq!(range.get((0, 1)), Some(&Style::default()));
+        assert_eq!(range.get((1_048_575, 16_383)), Some(&styled));
     }
 }

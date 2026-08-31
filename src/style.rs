@@ -403,6 +403,8 @@ pub enum HorizontalAlignment {
     Left,
     /// Center alignment
     Center,
+    /// Center across adjacent selected cells
+    CenterContinuous,
     /// Right alignment
     Right,
     /// Justify alignment

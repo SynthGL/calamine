@@ -335,6 +335,7 @@ fn parse_horizontal_alignment(s: &str) -> HorizontalAlignment {
     match s {
         "left" => HorizontalAlignment::Left,
         "center" => HorizontalAlignment::Center,
+        "centerContinuous" => HorizontalAlignment::CenterContinuous,
         "right" => HorizontalAlignment::Right,
         "justify" => HorizontalAlignment::Justify,
         "distributed" => HorizontalAlignment::Distributed,
@@ -1048,6 +1049,41 @@ mod tests {
         );
         assert!(parse_alignment_xml(br#"<alignment textRotation="181"/>"#).is_err());
         assert!(parse_alignment_xml(br#"<alignment textRotation="invalid"/>"#).is_err());
+    }
+
+    #[test]
+    fn alignment_preserves_every_ooxml_horizontal_and_vertical_token() {
+        for (token, expected) in [
+            ("general", HorizontalAlignment::General),
+            ("left", HorizontalAlignment::Left),
+            ("center", HorizontalAlignment::Center),
+            ("right", HorizontalAlignment::Right),
+            ("fill", HorizontalAlignment::Fill),
+            ("justify", HorizontalAlignment::Justify),
+            ("centerContinuous", HorizontalAlignment::CenterContinuous),
+            ("distributed", HorizontalAlignment::Distributed),
+        ] {
+            assert_eq!(parse_horizontal_alignment(token), expected);
+        }
+        for (token, expected) in [
+            ("top", VerticalAlignment::Top),
+            ("center", VerticalAlignment::Center),
+            ("bottom", VerticalAlignment::Bottom),
+            ("justify", VerticalAlignment::Justify),
+            ("distributed", VerticalAlignment::Distributed),
+        ] {
+            assert_eq!(parse_vertical_alignment(token), expected);
+        }
+
+        let center_across =
+            parse_alignment_xml(br#"<alignment horizontal="centerContinuous"/>"#).unwrap();
+        assert_eq!(
+            center_across.horizontal,
+            HorizontalAlignment::CenterContinuous
+        );
+        assert!(Style::new()
+            .with_alignment(center_across)
+            .has_visible_properties());
     }
 
     #[test]

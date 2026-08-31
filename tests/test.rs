@@ -3,9 +3,7 @@
 // Copyright 2016-2025, Johann Tuffe.
 
 use calamine::vba::Reference;
-use calamine::Data::{
-    Bool, DateTime, DateTimeIso, DurationIso, Empty, Error, Float, Int, String,
-};
+use calamine::Data::{Bool, DateTime, DateTimeIso, DurationIso, Empty, Error, Float, Int, String};
 use calamine::{
     open_workbook, open_workbook_auto, BorderStyle, Color, DataRef, DataType, Dimensions,
     ExcelDateTime, ExcelDateTimeType, HeaderRow, HorizontalAlignment, Ods, Range, Reader,

@@ -46,6 +46,8 @@ pub const MAX_ROWS: u32 = 1_048_576;
 /// Maximum number of columns allowed in an XLSX file.
 pub const MAX_COLUMNS: u32 = 16_384;
 
+const DEFAULT_COLUMN_WIDTH: f64 = 8.43;
+
 fn theme_slot(name: &[u8]) -> Option<usize> {
     match name {
         // SpreadsheetML's numeric theme indices use the effective display
@@ -2223,7 +2225,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                             {
                                 let mut min_column = None;
                                 let mut max_column = None;
-                                let mut width = 0.0;
+                                let mut width = None;
                                 let mut custom_width = false;
                                 let mut hidden = false;
                                 let mut best_fit = false;
@@ -2242,10 +2244,14 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                             }
                                         }
                                         b"width" => {
+                                            // Preserve the historical fallback for a malformed
+                                            // width attribute while keeping an absent attribute
+                                            // distinct from an explicit width of zero.
+                                            width = Some(0.0);
                                             if let Ok(width_str) = xml.decoder().decode(&attr.value)
                                             {
                                                 if let Ok(w) = width_str.parse::<f64>() {
-                                                    width = w;
+                                                    width = Some(w);
                                                 }
                                             }
                                         }
@@ -2264,6 +2270,9 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                 }
 
                                 if let Some(min_column) = min_column {
+                                    let width = width.unwrap_or_else(|| {
+                                        layout.default_column_width.unwrap_or(DEFAULT_COLUMN_WIDTH)
+                                    });
                                     for column in worksheet_column_span(min_column, max_column)? {
                                         let column_width = ColumnWidth::new(column, width)
                                             .with_custom_width(custom_width)
@@ -5058,6 +5067,44 @@ mod tests {
         let malformed = br#"<worksheet><cols><col min="1" max="1" hidden="sometimes"/></cols><sheetData/></worksheet>"#;
         let mut malformed_workbook = workbook_with_sheet(malformed, Vec::new(), Vec::new());
         assert!(malformed_workbook.worksheet_layout("Sheet1").is_err());
+    }
+
+    #[test]
+    fn test_layout_widthless_columns_inherit_defaults_and_explicit_zero() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetFormatPr defaultColWidth="9.5"/>
+  <cols>
+    <col min="1" max="1" hidden="1"/>
+    <col min="2" max="2" style="3"/>
+    <col min="3" max="3" width="0" customWidth="1"/>
+  </cols>
+  <sheetData/>
+</worksheet>"#;
+        let mut workbook = workbook_with_sheet(sheet_xml, Vec::new(), Vec::new());
+
+        let layout = workbook.worksheet_layout("Sheet1").unwrap();
+
+        let hidden_column = layout.get_column_width(0).unwrap();
+        assert_eq!(hidden_column.width, 9.5);
+        assert!(hidden_column.hidden);
+        assert_eq!(layout.get_column_width(1).unwrap().width, 9.5);
+        let zero_width_column = layout.get_column_width(2).unwrap();
+        assert_eq!(zero_width_column.width, 0.0);
+        assert!(zero_width_column.custom_width);
+
+        let library_default_xml = br#"<worksheet>
+  <cols><col min="1" max="1" hidden="1"/></cols>
+  <sheetData/>
+</worksheet>"#;
+        let mut library_default_workbook =
+            workbook_with_sheet(library_default_xml, Vec::new(), Vec::new());
+
+        let library_default_layout = library_default_workbook.worksheet_layout("Sheet1").unwrap();
+        assert_eq!(
+            library_default_layout.get_column_width(0).unwrap().width,
+            DEFAULT_COLUMN_WIDTH
+        );
     }
 
     #[test]

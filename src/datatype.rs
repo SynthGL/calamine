@@ -250,15 +250,33 @@ impl DataType for Data {
     }
 }
 
+fn rich_text_equals_plain(rich_text: &RichText, mut plain_text: &str) -> bool {
+    for run in &rich_text.runs {
+        let Some(remaining) = plain_text.strip_prefix(run.text.as_str()) else {
+            return false;
+        };
+        plain_text = remaining;
+    }
+    plain_text.is_empty()
+}
+
 impl PartialEq<&str> for Data {
     fn eq(&self, other: &&str) -> bool {
-        matches!(self, Data::String(s) if s == other)
+        match self {
+            Data::String(value) => value == other,
+            Data::RichText(value) => rich_text_equals_plain(value, other),
+            _ => false,
+        }
     }
 }
 
 impl PartialEq<str> for Data {
     fn eq(&self, other: &str) -> bool {
-        matches!(self, Data::String(s) if s == other)
+        match self {
+            Data::String(value) => value == other,
+            Data::RichText(value) => rich_text_equals_plain(value, other),
+            _ => false,
+        }
     }
 }
 
@@ -602,13 +620,25 @@ impl DataType for DataRef<'_> {
 
 impl PartialEq<&str> for DataRef<'_> {
     fn eq(&self, other: &&str) -> bool {
-        matches!(self, DataRef::String(s) if s == other)
+        match self {
+            DataRef::String(value) => value == other,
+            DataRef::SharedString(value) => value == other,
+            DataRef::SharedRichText(value) => rich_text_equals_plain(value, other),
+            DataRef::RichText(value) => rich_text_equals_plain(value, other),
+            _ => false,
+        }
     }
 }
 
 impl PartialEq<str> for DataRef<'_> {
     fn eq(&self, other: &str) -> bool {
-        matches!(self, DataRef::String(s) if s == other)
+        match self {
+            DataRef::String(value) => value == other,
+            DataRef::SharedString(value) => *value == other,
+            DataRef::SharedRichText(value) => rich_text_equals_plain(value, other),
+            DataRef::RichText(value) => rich_text_equals_plain(value, other),
+            _ => false,
+        }
     }
 }
 
@@ -1271,8 +1301,20 @@ mod tests {
 
     #[test]
     fn test_partial_eq() {
+        use crate::TextRun;
+
         assert_eq!(Data::String("value".to_string()), "value");
         assert_eq!(Data::String("value".to_string()), "value"[..]);
+        let rich_text = RichText::from_runs(vec![
+            TextRun::new("Head".to_string()),
+            TextRun::new("er".to_string()),
+        ]);
+        assert_eq!(Data::RichText(rich_text.clone()), "Header");
+        assert_eq!(Data::RichText(rich_text.clone()), "Header"[..]);
+        assert_ne!(Data::RichText(rich_text.clone()), "Header!");
+        assert_eq!(DataRef::SharedRichText(&rich_text), "Header");
+        assert_eq!(DataRef::RichText(rich_text), "Header"[..]);
+        assert_eq!(DataRef::SharedString("Header"), "Header");
         assert_eq!(Data::Float(100.0), 100.0f64);
         assert_eq!(Data::Bool(true), true);
         assert_eq!(Data::Int(100), 100i64);

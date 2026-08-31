@@ -2624,7 +2624,7 @@ fn test_all_styles() {
 
     // assert that 100 is formatted as $100.00
     let a11 = styles.get((10, 0)).unwrap().get_number_format().unwrap();
-    assert_eq!(a11.format_code, "$0.00");
+    assert_eq!(a11.format_code, r"\$0.00");
 
     // assert that 0.5 is formatted as 0.5%
     // assert that the value is 0.5
@@ -2639,7 +2639,7 @@ fn test_all_styles() {
 
     // assert that 7/21/2025  1:09:31 PM is formatted as 2005-07-21 13:09:31
     let a14 = styles.get((13, 0)).unwrap().get_number_format().unwrap();
-    assert_eq!(a14.format_code, "yyyy-mm-dd hh:mm:ss");
+    assert_eq!(a14.format_code, r"yyyy\-mm\-dd\ hh:mm:ss");
     assert_eq!(
         values.get((13, 0)).unwrap(),
         &DateTime(ExcelDateTime::new(

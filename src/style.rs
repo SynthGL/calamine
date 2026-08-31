@@ -610,6 +610,10 @@ impl Fill {
 pub struct NumberFormat {
     /// Format code.
     ///
+    /// Custom OOXML codes retain format-language escapes such as `\\` after
+    /// XML entities have been decoded, so callers can interpret or reproduce
+    /// the workbook format faithfully.
+    ///
     /// This is empty when a workbook references a locale-reserved or unknown
     /// built-in format ID. In that case, [`Self::format_id`] still preserves
     /// the source identifier; an empty code must not be interpreted as

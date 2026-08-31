@@ -139,21 +139,6 @@ fn parse_theme_rgb(value: &[u8]) -> Result<crate::Color, XlsxError> {
     ))
 }
 
-fn normalize_number_format_code(format_code: &str) -> String {
-    let mut normalized = String::new();
-    let mut chars = format_code.chars();
-    while let Some(character) = chars.next() {
-        if character == '\\' {
-            // The public style model exposes the displayed literal, but callers
-            // that classify values must retain and inspect the original escapes.
-            normalized.push(chars.next().unwrap_or(character));
-        } else {
-            normalized.push(character);
-        }
-    }
-    normalized
-}
-
 /// Return the locale-independent built-in format code for an OOXML format ID.
 ///
 /// Only IDs whose format code is defined identically for all languages are
@@ -238,7 +223,7 @@ fn compact_worksheet_style_palette(
 fn parse_xf_record<R: std::io::BufRead>(
     xml: &mut XmlReader<R>,
     start: &BytesStart<'_>,
-    number_formats: &BTreeMap<Vec<u8>, (String, String)>,
+    number_formats: &BTreeMap<Vec<u8>, String>,
     fonts: &[Font],
     fills: &[crate::Fill],
     borders: &[crate::Borders],
@@ -341,7 +326,7 @@ fn parse_xf_record<R: std::io::BufRead>(
         if let Some(id_bytes) = num_fmt_id_bytes.as_ref() {
             if let Ok(num_fmt_id) = xml.decoder().decode(id_bytes)?.parse::<u32>() {
                 let format_code = match number_formats.get(id_bytes) {
-                    Some((_, exposed)) => exposed.clone(),
+                    Some(raw) => raw.clone(),
                     None => builtin_number_format_code(num_fmt_id)
                         .unwrap_or_default()
                         .to_string(),
@@ -350,7 +335,7 @@ fn parse_xf_record<R: std::io::BufRead>(
                     crate::style::NumberFormat::new(format_code).with_id(num_fmt_id),
                 );
                 cell_format = match number_formats.get(id_bytes) {
-                    Some((raw, _)) => detect_custom_number_format(raw),
+                    Some(raw) => detect_custom_number_format(raw),
                     None => builtin_format_by_id(id_bytes),
                 };
             }
@@ -822,8 +807,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                         let raw = a
                                             .decode_and_unescape_value(xml.decoder())?
                                             .into_owned();
-                                        let exposed = normalize_number_format_code(&raw);
-                                        format = Some((raw, exposed));
+                                        format = Some(raw);
                                     }
                                     _ => (),
                                 }
@@ -1010,14 +994,14 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                 apply_number_format.then_some(num_fmt_id_bytes).flatten();
                             if let Some(id_bytes) = num_fmt_id_bytes.as_ref() {
                                 cell_format = match number_formats.get(id_bytes) {
-                                    Some((raw, _)) => detect_custom_number_format(raw),
+                                    Some(raw) => detect_custom_number_format(raw),
                                     None => builtin_format_by_id(id_bytes),
                                 };
                                 if let Ok(num_fmt_id) =
                                     xml.decoder().decode(id_bytes)?.parse::<u32>()
                                 {
                                     let format_code = match number_formats.get(id_bytes) {
-                                        Some((_, exposed)) => exposed.clone(),
+                                        Some(raw) => raw.clone(),
                                         None => builtin_number_format_code(num_fmt_id)
                                             .unwrap_or_default()
                                             .to_string(),
@@ -4760,14 +4744,49 @@ mod tests {
     }
 
     #[test]
-    fn test_number_format_keeps_raw_escapes_for_type_detection() {
-        let raw = r"\Y000000";
-        assert_eq!(normalize_number_format_code(raw), "Y000000");
-        assert_eq!(detect_custom_number_format(raw), CellFormat::Other);
+    fn test_number_format_preserves_raw_escapes_in_style_and_type_detection() {
+        let styles_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="1"><numFmt numFmtId="164" formatCode="\Y000000"/></numFmts>
+  <cellXfs count="1"><xf numFmtId="164"/></cellXfs>
+</styleSheet>"#;
+        let cursor = Cursor::new(Vec::new());
+        let mut zip_writer = ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip_writer.start_file("xl/styles.xml", options).unwrap();
+        zip_writer.write_all(styles_xml).unwrap();
+        let mut cursor = zip_writer.finish().unwrap();
+        cursor.set_position(0);
+
+        let mut workbook = Xlsx {
+            zip: ZipArchive::new(cursor).unwrap(),
+            strings: Vec::new(),
+            sheets: Vec::new(),
+            tables: None,
+            formats: Vec::new(),
+            styles: Vec::new(),
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
+            is_1904: false,
+            metadata: Metadata::default(),
+            #[cfg(feature = "picture")]
+            pictures: None,
+            merged_regions: None,
+            options: XlsxOptions::default(),
+        };
+
+        workbook.read_styles().unwrap();
         assert_eq!(
-            detect_custom_number_format(&normalize_number_format_code(raw)),
-            CellFormat::DateTime
+            workbook.styles[0]
+                .number_format
+                .as_ref()
+                .unwrap()
+                .format_code,
+            r"\Y000000"
         );
+        assert_eq!(workbook.formats[0], CellFormat::Other);
+        assert_eq!(detect_custom_number_format("Y000000"), CellFormat::DateTime);
     }
 
     #[test]

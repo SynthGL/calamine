@@ -278,12 +278,20 @@ impl<RS: Read + Seek> Reader<RS> for Xls<RS> {
         }
     }
 
-    fn worksheet_style(&mut self, _name: &str) -> Result<StyleRange, XlsError> {
+    fn worksheet_style(&mut self, name: &str) -> Result<StyleRange, XlsError> {
+        if !self.sheets.contains_key(name) {
+            return Err(XlsError::WorksheetNotFound(name.into()));
+        }
+
         // TODO: Implement XLS style parsing
         Ok(StyleRange::empty())
     }
 
-    fn worksheet_layout(&mut self, _name: &str) -> Result<WorksheetLayout, XlsError> {
+    fn worksheet_layout(&mut self, name: &str) -> Result<WorksheetLayout, XlsError> {
+        if !self.sheets.contains_key(name) {
+            return Err(XlsError::WorksheetNotFound(name.into()));
+        }
+
         // XLS doesn't support column width/row height information in the same way as XLSX
         Ok(WorksheetLayout::new())
     }

@@ -1137,15 +1137,22 @@ impl StyleRange {
                 continue;
             }
 
-            // Use Excel's style_id if available for deduplication. Styles without
-            // a source ID retain the prior behavior of receiving distinct IDs.
-            let excel_style_id = style.style_id.unwrap_or(palette.len() as u32);
-            let style_id = if let Some(&id) = style_to_id.get(&excel_style_id) {
-                id
+            // Use Excel's style_id when one is available. Id-less styles are
+            // deliberately kept distinct and must not manufacture a key from
+            // the palette length: that synthetic key could collide with a real
+            // workbook style ID encountered later.
+            let style_id = if let Some(excel_style_id) = style.style_id {
+                if let Some(&id) = style_to_id.get(&excel_style_id) {
+                    id
+                } else {
+                    let id = palette.len().min(u16::MAX as usize) as u16;
+                    palette.push(style);
+                    style_to_id.insert(excel_style_id, id);
+                    id
+                }
             } else {
                 let id = palette.len().min(u16::MAX as usize) as u16;
                 palette.push(style);
-                style_to_id.insert(excel_style_id, id);
                 id
             };
             style_cells.push((row, column, usize::from(style_id)));
@@ -1449,5 +1456,19 @@ mod tests {
         assert_eq!(range.get((0, 0)), Some(&styled));
         assert_eq!(range.get((0, 1)), Some(&Style::default()));
         assert_eq!(range.get((1_048_575, 16_383)), Some(&styled));
+    }
+
+    #[test]
+    fn test_idless_style_does_not_alias_real_style_id() {
+        let idless = Style::new().with_font(Font::new().with_name("Idless".to_string()));
+        let real_id = Style::new()
+            .with_font(Font::new().with_name("Workbook style 1".to_string()))
+            .with_style_id(1);
+
+        let range = StyleRange::from_sparse(vec![(0, 0, idless.clone()), (0, 1, real_id.clone())]);
+
+        assert_eq!(range.get((0, 0)), Some(&idless));
+        assert_eq!(range.get((0, 1)), Some(&real_id));
+        assert_eq!(range.unique_style_count(), 2);
     }
 }

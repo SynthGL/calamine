@@ -529,12 +529,20 @@ impl<RS: Read + Seek> Reader<RS> for Xlsb<RS> {
         Ok(Range::from_sparse(cells))
     }
 
-    fn worksheet_style(&mut self, _name: &str) -> Result<StyleRange, XlsbError> {
+    fn worksheet_style(&mut self, name: &str) -> Result<StyleRange, XlsbError> {
+        if !self.sheets.iter().any(|(sheet_name, _)| sheet_name == name) {
+            return Err(XlsbError::WorksheetNotFound(name.into()));
+        }
+
         // TODO: Implement XLSB style parsing
         Ok(StyleRange::empty())
     }
 
-    fn worksheet_layout(&mut self, _name: &str) -> Result<WorksheetLayout, XlsbError> {
+    fn worksheet_layout(&mut self, name: &str) -> Result<WorksheetLayout, XlsbError> {
+        if !self.sheets.iter().any(|(sheet_name, _)| sheet_name == name) {
+            return Err(XlsbError::WorksheetNotFound(name.into()));
+        }
+
         // XLSB doesn't support column width/row height information in the same way as XLSX yet
         Ok(WorksheetLayout::new())
     }

@@ -13,24 +13,88 @@ use crate::style::*;
 use crate::utils::unescape_entity_to_buffer;
 use crate::XlsxError;
 
-/// Get theme color from Excel's theme color palette
-/// Based on Office Open XML standard theme colors
-fn get_theme_color(theme: u8) -> Color {
-    match theme {
-        0 => Color::rgb(255, 255, 255), // Light 1 (White)
-        1 => Color::rgb(0, 0, 0),       // Dark 1 (Black)
-        2 => Color::rgb(68, 84, 106),   // Light 2 (Light Gray)
-        3 => Color::rgb(31, 73, 125),   // Dark 2 (Dark Blue)
-        4 => Color::rgb(79, 129, 189),  // Accent 1 (Blue)
-        5 => Color::rgb(192, 80, 77),   // Accent 2 (Red)
-        6 => Color::rgb(155, 187, 89),  // Accent 3 (Green)
-        7 => Color::rgb(128, 100, 162), // Accent 4 (Purple)
-        8 => Color::rgb(75, 172, 198),  // Accent 5 (Cyan)
-        9 => Color::rgb(247, 150, 70),  // Accent 6 (Orange)
-        10 => Color::rgb(99, 99, 99),   // Hyperlink (Blue)
-        11 => Color::rgb(128, 0, 128),  // Followed Hyperlink (Purple)
-        _ => Color::rgb(0, 0, 0),       // Default to black for unknown theme colors
-    }
+/// Default Office theme in SpreadsheetML's zero-based slot order: `dk1`,
+/// `lt1`, `dk2`, `lt2`, six accents, hyperlink, and followed hyperlink.
+pub(super) const DEFAULT_THEME_COLORS: [Color; 12] = [
+    Color {
+        alpha: 255,
+        red: 0,
+        green: 0,
+        blue: 0,
+    },
+    Color {
+        alpha: 255,
+        red: 255,
+        green: 255,
+        blue: 255,
+    },
+    Color {
+        alpha: 255,
+        red: 31,
+        green: 73,
+        blue: 125,
+    },
+    Color {
+        alpha: 255,
+        red: 238,
+        green: 236,
+        blue: 225,
+    },
+    Color {
+        alpha: 255,
+        red: 79,
+        green: 129,
+        blue: 189,
+    },
+    Color {
+        alpha: 255,
+        red: 192,
+        green: 80,
+        blue: 77,
+    },
+    Color {
+        alpha: 255,
+        red: 155,
+        green: 187,
+        blue: 89,
+    },
+    Color {
+        alpha: 255,
+        red: 128,
+        green: 100,
+        blue: 162,
+    },
+    Color {
+        alpha: 255,
+        red: 75,
+        green: 172,
+        blue: 198,
+    },
+    Color {
+        alpha: 255,
+        red: 247,
+        green: 150,
+        blue: 70,
+    },
+    Color {
+        alpha: 255,
+        red: 0,
+        green: 0,
+        blue: 255,
+    },
+    Color {
+        alpha: 255,
+        red: 128,
+        green: 0,
+        blue: 128,
+    },
+];
+
+pub(super) fn get_theme_color(theme: u8, theme_colors: &[Color; 12]) -> Color {
+    theme_colors
+        .get(usize::from(theme))
+        .copied()
+        .unwrap_or(Color::rgb(0, 0, 0))
 }
 
 /// Resolve an OOXML indexed color.
@@ -113,7 +177,10 @@ pub(super) fn get_indexed_color(index: u8) -> Color {
 }
 
 /// Parse color from XML attributes
-fn parse_color(attributes: &[Attribute]) -> Result<Option<Color>, XlsxError> {
+fn parse_color(
+    attributes: &[Attribute],
+    theme_colors: &[Color; 12],
+) -> Result<Option<Color>, XlsxError> {
     for attr in attributes {
         match attr.key.as_ref() {
             b"rgb" => {
@@ -143,7 +210,7 @@ fn parse_color(attributes: &[Attribute]) -> Result<Option<Color>, XlsxError> {
             b"theme" => {
                 let theme_str = String::from_utf8_lossy(&attr.value);
                 if let Ok(theme_value) = theme_str.parse::<u8>() {
-                    return Ok(Some(get_theme_color(theme_value)));
+                    return Ok(Some(get_theme_color(theme_value, theme_colors)));
                 }
             }
             b"indexed" => {
@@ -270,6 +337,7 @@ fn parse_border_style(s: &str) -> BorderStyle {
 pub fn parse_font<RS: BufRead>(
     xml: &mut Reader<RS>,
     _start_elem: &BytesStart,
+    theme_colors: &[Color; 12],
 ) -> Result<Font, XlsxError> {
     let mut font = Font::new();
 
@@ -377,14 +445,28 @@ pub fn parse_font<RS: BufRead>(
                     font = font.with_strikethrough(true);
                 }
                 b"color" => {
-                    if let Some(color) =
-                        parse_color(&e.attributes().collect::<Result<Vec<_>, _>>()?)?
-                    {
+                    if let Some(color) = parse_color(
+                        &e.attributes().collect::<Result<Vec<_>, _>>()?,
+                        theme_colors,
+                    )? {
                         font = font.with_color(color);
                     }
                 }
                 b"family" => {
-                    if let Some(family) = read_string(xml, QName(b"family"))? {
+                    let mut family = None;
+                    for attr in e.attributes() {
+                        let attr = attr?;
+                        if attr.key.as_ref() == b"val" {
+                            family = Some(String::from_utf8_lossy(&attr.value).to_string());
+                            break;
+                        }
+                    }
+                    if family.is_none() {
+                        family = read_string(xml, QName(b"family"))?;
+                    } else {
+                        xml.read_to_end_into(e.name(), &mut Vec::new())?;
+                    }
+                    if let Some(family) = family {
                         font = font.with_family(family);
                     }
                 }
@@ -404,6 +486,7 @@ pub fn parse_font<RS: BufRead>(
 pub fn parse_fill<RS: BufRead>(
     xml: &mut Reader<RS>,
     _start_elem: &BytesStart,
+    theme_colors: &[Color; 12],
 ) -> Result<Fill, XlsxError> {
     let mut fill = Fill::new();
 
@@ -435,16 +518,18 @@ pub fn parse_fill<RS: BufRead>(
                     }
                 }
                 b"fgColor" => {
-                    if let Some(color) =
-                        parse_color(&e.attributes().collect::<Result<Vec<_>, _>>()?)?
-                    {
+                    if let Some(color) = parse_color(
+                        &e.attributes().collect::<Result<Vec<_>, _>>()?,
+                        theme_colors,
+                    )? {
                         fill = fill.with_foreground_color(color);
                     }
                 }
                 b"bgColor" => {
-                    if let Some(color) =
-                        parse_color(&e.attributes().collect::<Result<Vec<_>, _>>()?)?
-                    {
+                    if let Some(color) = parse_color(
+                        &e.attributes().collect::<Result<Vec<_>, _>>()?,
+                        theme_colors,
+                    )? {
                         fill = fill.with_background_color(color);
                     }
                 }
@@ -460,7 +545,7 @@ pub fn parse_fill<RS: BufRead>(
     Ok(fill)
 }
 
-fn parse_ooxml_bool(value: &[u8]) -> Result<bool, XlsxError> {
+pub(super) fn parse_ooxml_bool(value: &[u8]) -> Result<bool, XlsxError> {
     match value {
         b"1" | b"true" => Ok(true),
         b"0" | b"false" => Ok(false),
@@ -468,7 +553,10 @@ fn parse_ooxml_bool(value: &[u8]) -> Result<bool, XlsxError> {
     }
 }
 
-fn border_from_element(element: &BytesStart<'_>) -> Result<Border, XlsxError> {
+fn border_from_element(
+    element: &BytesStart<'_>,
+    theme_colors: &[Color; 12],
+) -> Result<Border, XlsxError> {
     let attributes = element.attributes().collect::<Result<Vec<_>, _>>()?;
     let mut style = BorderStyle::None;
     for attribute in &attributes {
@@ -477,7 +565,7 @@ fn border_from_element(element: &BytesStart<'_>) -> Result<Border, XlsxError> {
         }
     }
 
-    Ok(match parse_color(&attributes)? {
+    Ok(match parse_color(&attributes, theme_colors)? {
         Some(color) => Border::with_color(style, color),
         None => Border::new(style),
     })
@@ -515,6 +603,7 @@ fn is_border_side(name: &[u8]) -> bool {
 pub fn parse_border<RS: BufRead>(
     xml: &mut Reader<RS>,
     start_elem: &BytesStart<'_>,
+    theme_colors: &[Color; 12],
 ) -> Result<Borders, XlsxError> {
     let mut borders = Borders::new();
     let mut diagonal_down = false;
@@ -538,7 +627,7 @@ pub fn parse_border<RS: BufRead>(
             Ok(Event::Start(ref element)) if is_border_side(element.local_name().as_ref()) => {
                 let side = element.local_name().as_ref().to_vec();
                 let closing = element.name();
-                let mut border = border_from_element(element)?;
+                let mut border = border_from_element(element, theme_colors)?;
                 let mut inner_buf = Vec::new();
 
                 loop {
@@ -546,12 +635,12 @@ pub fn parse_border<RS: BufRead>(
                     match xml.read_event_into(&mut inner_buf) {
                         Ok(Event::Start(ref inner)) if inner.local_name().as_ref() == b"color" => {
                             let attributes = inner.attributes().collect::<Result<Vec<_>, _>>()?;
-                            border.color = parse_color(&attributes)?;
+                            border.color = parse_color(&attributes, theme_colors)?;
                             xml.read_to_end_into(inner.name(), &mut Vec::new())?;
                         }
                         Ok(Event::Empty(ref inner)) if inner.local_name().as_ref() == b"color" => {
                             let attributes = inner.attributes().collect::<Result<Vec<_>, _>>()?;
-                            border.color = parse_color(&attributes)?;
+                            border.color = parse_color(&attributes, theme_colors)?;
                         }
                         Ok(Event::Start(ref inner)) => {
                             xml.read_to_end_into(inner.name(), &mut Vec::new())?;
@@ -566,7 +655,7 @@ pub fn parse_border<RS: BufRead>(
                 apply_border(&mut borders, &side, border, diagonal_down, diagonal_up);
             }
             Ok(Event::Empty(ref element)) if is_border_side(element.local_name().as_ref()) => {
-                let border = border_from_element(element)?;
+                let border = border_from_element(element, theme_colors)?;
                 apply_border(
                     &mut borders,
                     element.local_name().as_ref(),
@@ -696,6 +785,17 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    fn parse_font_xml(source: &[u8]) -> Result<Font, XlsxError> {
+        let mut xml = Reader::from_reader(Cursor::new(source));
+        xml.config_mut().expand_empty_elements = true;
+        let mut buf = Vec::new();
+        let start = match xml.read_event_into(&mut buf).unwrap() {
+            Event::Start(element) => element.into_owned(),
+            event => panic!("expected font start, got {event:?}"),
+        };
+        parse_font(&mut xml, &start, &DEFAULT_THEME_COLORS)
+    }
+
     fn parse_border_xml(source: &[u8]) -> Result<Borders, XlsxError> {
         let mut xml = Reader::from_reader(Cursor::new(source));
         let mut buf = Vec::new();
@@ -703,7 +803,7 @@ mod tests {
             Event::Start(element) => element.into_owned(),
             event => panic!("expected border start, got {event:?}"),
         };
-        parse_border(&mut xml, &start)
+        parse_border(&mut xml, &start, &DEFAULT_THEME_COLORS)
     }
 
     #[test]
@@ -713,6 +813,36 @@ mod tests {
         assert_eq!(get_indexed_color(2), Color::rgb(255, 0, 0));
         assert_eq!(get_indexed_color(7), Color::rgb(0, 255, 255));
         assert_eq!(get_indexed_color(63), Color::rgb(51, 51, 51));
+    }
+
+    #[test]
+    fn theme_colors_use_ooxml_slot_order() {
+        assert_eq!(
+            get_theme_color(0, &DEFAULT_THEME_COLORS),
+            Color::rgb(0, 0, 0)
+        );
+        assert_eq!(
+            get_theme_color(1, &DEFAULT_THEME_COLORS),
+            Color::rgb(255, 255, 255)
+        );
+        assert_eq!(
+            get_theme_color(2, &DEFAULT_THEME_COLORS),
+            Color::rgb(31, 73, 125)
+        );
+        assert_eq!(
+            get_theme_color(3, &DEFAULT_THEME_COLORS),
+            Color::rgb(238, 236, 225)
+        );
+        assert_eq!(
+            get_theme_color(10, &DEFAULT_THEME_COLORS),
+            Color::rgb(0, 0, 255)
+        );
+    }
+
+    #[test]
+    fn font_family_uses_val_attribute() {
+        let font = parse_font_xml(br#"<font><family val="2"/></font>"#).unwrap();
+        assert_eq!(font.family.as_deref(), Some("2"));
     }
 
     #[test]

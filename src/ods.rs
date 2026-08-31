@@ -273,12 +273,20 @@ where
             .map(|r| r.1.to_owned())
     }
 
-    fn worksheet_style(&mut self, _name: &str) -> Result<StyleRange, OdsError> {
+    fn worksheet_style(&mut self, name: &str) -> Result<StyleRange, OdsError> {
+        if !self.sheets.contains_key(name) {
+            return Err(OdsError::WorksheetNotFound(name.into()));
+        }
+
         // TODO: Implement ODS style parsing
         Ok(StyleRange::empty())
     }
 
-    fn worksheet_layout(&mut self, _name: &str) -> Result<WorksheetLayout, OdsError> {
+    fn worksheet_layout(&mut self, name: &str) -> Result<WorksheetLayout, OdsError> {
+        if !self.sheets.contains_key(name) {
+            return Err(OdsError::WorksheetNotFound(name.into()));
+        }
+
         // ODS doesn't support column width/row height information in the same way as XLSX
         Ok(WorksheetLayout::new())
     }

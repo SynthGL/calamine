@@ -13,13 +13,14 @@ use std::{
 };
 
 use super::{
-    get_attribute, get_dimension, get_row, get_row_column, read_rich_string, Dimensions, XlReader,
+    get_attribute, get_dimension, get_row, get_row_column, read_rich_string, style_parser,
+    Dimensions, XlReader,
 };
 use crate::{
     datatype::DataRef,
     formats::{format_excel_f64_ref, CellFormat},
     utils::unescape_entity_to_buffer,
-    Cell, Data, Style, XlsxError,
+    Cell, Color, Data, Style, XlsxError,
 };
 
 type FormulaMap = HashMap<(u32, u32), (i64, i64)>;
@@ -33,6 +34,7 @@ where
     strings: &'a [Data],
     formats: &'a [CellFormat],
     styles: &'a [Style],
+    theme_colors: &'a [Color; 12],
     is_1904: bool,
     dimensions: Dimensions,
     row_index: u32,
@@ -47,10 +49,28 @@ where
     RS: Read + Seek,
 {
     pub fn new(
+        xml: XlReader<'a, RS>,
+        strings: &'a [Data],
+        formats: &'a [CellFormat],
+        styles: &'a [Style],
+        is_1904: bool,
+    ) -> Result<Self, XlsxError> {
+        Self::new_with_theme(
+            xml,
+            strings,
+            formats,
+            styles,
+            &style_parser::DEFAULT_THEME_COLORS,
+            is_1904,
+        )
+    }
+
+    pub(crate) fn new_with_theme(
         mut xml: XlReader<'a, RS>,
         strings: &'a [Data],
         formats: &'a [CellFormat],
         styles: &'a [Style],
+        theme_colors: &'a [Color; 12],
         is_1904: bool,
     ) -> Result<Self, XlsxError> {
         let mut dimensions = Dimensions {
@@ -76,6 +96,7 @@ where
                                 strings,
                                 formats,
                                 styles,
+                                theme_colors,
                                 is_1904,
                                 dimensions,
                                 row_index: 0,
@@ -180,6 +201,7 @@ where
                                 value = read_value(
                                     self.strings,
                                     self.formats,
+                                    self.theme_colors,
                                     self.is_1904,
                                     &mut self.xml,
                                     &e,
@@ -513,6 +535,7 @@ where
 fn read_value<'s, RS>(
     strings: &'s [Data],
     formats: &[CellFormat],
+    theme_colors: &[Color; 12],
     is_1904: bool,
     xml: &mut XlReader<'_, RS>,
     e: &BytesStart<'_>,
@@ -524,8 +547,7 @@ where
     Ok(match e.local_name().as_ref() {
         b"is" => {
             // inlineStr
-            match read_rich_string(xml, e.name())? {
-                Some(Data::String(value)) if value.is_empty() => DataRef::Empty,
+            match read_rich_string(xml, e.name(), theme_colors)? {
                 Some(Data::String(value)) => DataRef::String(value),
                 Some(Data::RichText(value)) => DataRef::RichText(value),
                 Some(_) => {

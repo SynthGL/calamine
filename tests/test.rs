@@ -2770,7 +2770,7 @@ fn test_problematic_formats() {
     let range = xlsx.worksheet_range("Sheet1").unwrap();
     let styles = xlsx.worksheet_style("Sheet1").unwrap();
 
-    // Check cell A1 (0,0) - should have white font
+    // Check cell A1 (0,0) - theme slot 0 is dk1 (black)
     let a1_style = styles
         .get((0, 0))
         .expect("A1 should have style information");
@@ -2781,11 +2781,11 @@ fn test_problematic_formats() {
     // Optional font name and size fields may legitimately be absent. Reaching this
     // point verifies that the style and font records were parsed successfully.
 
-    // Check font color - should be white
+    // Check font color - should resolve the workbook's dk1 theme slot
     if let Some(color) = a1_font.color {
         assert!(
-            color.is_white(),
-            "A1 font color should be white, got RGB({}, {}, {})",
+            color.is_black(),
+            "A1 font color should be black, got RGB({}, {}, {})",
             color.red,
             color.green,
             color.blue
@@ -3199,4 +3199,57 @@ fn test_style_range_rle() {
         // Should be able to access first cell's style
         let _ = style.get_font();
     }
+}
+
+#[test]
+fn unsupported_style_and_layout_readers_validate_sheet_names() {
+    const MISSING: &str = "__calamine_missing_sheet__";
+
+    let mut xls: Xls<_> = wb("issues.xls");
+    let xls_sheet = xls.sheet_names().into_iter().next().unwrap();
+    assert!(xls.worksheet_style(&xls_sheet).unwrap().is_empty());
+    assert!(!xls
+        .worksheet_layout(&xls_sheet)
+        .unwrap()
+        .has_custom_dimensions());
+    assert!(matches!(
+        xls.worksheet_style(MISSING),
+        Err(calamine::XlsError::WorksheetNotFound(name)) if name == MISSING
+    ));
+    assert!(matches!(
+        xls.worksheet_layout(MISSING),
+        Err(calamine::XlsError::WorksheetNotFound(name)) if name == MISSING
+    ));
+
+    let mut xlsb: Xlsb<_> = wb("issues.xlsb");
+    let xlsb_sheet = xlsb.sheet_names().into_iter().next().unwrap();
+    assert!(xlsb.worksheet_style(&xlsb_sheet).unwrap().is_empty());
+    assert!(!xlsb
+        .worksheet_layout(&xlsb_sheet)
+        .unwrap()
+        .has_custom_dimensions());
+    assert!(matches!(
+        xlsb.worksheet_style(MISSING),
+        Err(calamine::XlsbError::WorksheetNotFound(name)) if name == MISSING
+    ));
+    assert!(matches!(
+        xlsb.worksheet_layout(MISSING),
+        Err(calamine::XlsbError::WorksheetNotFound(name)) if name == MISSING
+    ));
+
+    let mut ods: Ods<_> = wb("issues.ods");
+    let ods_sheet = ods.sheet_names().into_iter().next().unwrap();
+    assert!(ods.worksheet_style(&ods_sheet).unwrap().is_empty());
+    assert!(!ods
+        .worksheet_layout(&ods_sheet)
+        .unwrap()
+        .has_custom_dimensions());
+    assert!(matches!(
+        ods.worksheet_style(MISSING),
+        Err(calamine::OdsError::WorksheetNotFound(name)) if name == MISSING
+    ));
+    assert!(matches!(
+        ods.worksheet_layout(MISSING),
+        Err(calamine::OdsError::WorksheetNotFound(name)) if name == MISSING
+    ));
 }

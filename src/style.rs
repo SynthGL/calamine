@@ -1,0 +1,1605 @@
+// SPDX-License-Identifier: MIT
+//
+// Copyright 2016-2025, Johann Tuffe.
+
+use std::collections::BTreeMap;
+use std::fmt;
+
+/// Represents a color in ARGB format
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Color {
+    /// Alpha channel (0-255)
+    pub alpha: u8,
+    /// Red channel (0-255)
+    pub red: u8,
+    /// Green channel (0-255)
+    pub green: u8,
+    /// Blue channel (0-255)
+    pub blue: u8,
+}
+
+impl Color {
+    /// Create a new color from ARGB values
+    pub fn new(alpha: u8, red: u8, green: u8, blue: u8) -> Self {
+        Self {
+            alpha,
+            red,
+            green,
+            blue,
+        }
+    }
+
+    /// Create a color from RGB values (alpha = 255)
+    pub fn rgb(red: u8, green: u8, blue: u8) -> Self {
+        Self::new(255, red, green, blue)
+    }
+
+    /// Create a color from ARGB integer
+    pub fn from_argb(argb: u32) -> Self {
+        Self {
+            alpha: ((argb >> 24) & 0xFF) as u8,
+            red: ((argb >> 16) & 0xFF) as u8,
+            green: ((argb >> 8) & 0xFF) as u8,
+            blue: (argb & 0xFF) as u8,
+        }
+    }
+
+    /// Convert to ARGB integer
+    pub fn to_argb(&self) -> u32 {
+        ((self.alpha as u32) << 24)
+            | ((self.red as u32) << 16)
+            | ((self.green as u32) << 8)
+            | (self.blue as u32)
+    }
+
+    /// Check if the color is black
+    pub fn is_black(&self) -> bool {
+        self.red == 0 && self.green == 0 && self.blue == 0
+    }
+
+    /// Check if the color is white
+    pub fn is_white(&self) -> bool {
+        self.red == 255 && self.green == 255 && self.blue == 255
+    }
+}
+
+impl fmt::Display for Color {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "#{:02X}{:02X}{:02X}", self.red, self.green, self.blue)
+    }
+}
+
+/// Border style enumeration
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum BorderStyle {
+    /// No border
+    #[default]
+    None,
+    /// Thin border
+    Thin,
+    /// Medium border
+    Medium,
+    /// Thick border
+    Thick,
+    /// Double border
+    Double,
+    /// Hair border
+    Hair,
+    /// Dashed border
+    Dashed,
+    /// Dotted border
+    Dotted,
+    /// Medium dashed border
+    MediumDashed,
+    /// Medium dash dot border
+    MediumDashDot,
+    /// Medium dash dot dot border
+    MediumDashDotDot,
+    /// Dash dot border
+    DashDot,
+    /// Dash dot dot border
+    DashDotDot,
+    /// Slant dash dot border
+    SlantDashDot,
+}
+
+/// Border side
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Border {
+    /// Border style
+    pub style: BorderStyle,
+    /// Border color
+    pub color: Option<Color>,
+}
+
+impl Border {
+    /// Create a new border with style
+    pub fn new(style: BorderStyle) -> Self {
+        Self { style, color: None }
+    }
+
+    /// Create a new border with style and color
+    pub fn with_color(style: BorderStyle, color: Color) -> Self {
+        Self {
+            style,
+            color: Some(color),
+        }
+    }
+
+    /// Check if border is visible
+    pub fn is_visible(&self) -> bool {
+        self.style != BorderStyle::None
+    }
+}
+
+/// All borders for a cell
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Borders {
+    /// Left border
+    pub left: Border,
+    /// Right border
+    pub right: Border,
+    /// Top border
+    pub top: Border,
+    /// Bottom border
+    pub bottom: Border,
+    /// Diagonal down border
+    pub diagonal_down: Border,
+    /// Diagonal up border
+    pub diagonal_up: Border,
+}
+
+impl Borders {
+    /// Create new borders
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if any border is visible
+    pub fn has_visible_borders(&self) -> bool {
+        self.left.is_visible()
+            || self.right.is_visible()
+            || self.top.is_visible()
+            || self.bottom.is_visible()
+            || self.diagonal_down.is_visible()
+            || self.diagonal_up.is_visible()
+    }
+}
+
+/// Font weight
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum FontWeight {
+    /// Normal weight
+    #[default]
+    Normal,
+    /// Bold weight
+    Bold,
+}
+
+/// Font style
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum FontStyle {
+    /// Normal style
+    #[default]
+    Normal,
+    /// Italic style
+    Italic,
+}
+
+/// Underline style
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum UnderlineStyle {
+    /// No underline
+    #[default]
+    None,
+    /// Single underline
+    Single,
+    /// Double underline
+    Double,
+    /// Single accounting underline
+    SingleAccounting,
+    /// Double accounting underline
+    DoubleAccounting,
+}
+
+/// Font properties
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Font {
+    /// Font name
+    pub name: Option<String>,
+    /// Font size in points
+    pub size: Option<f64>,
+    /// Font weight
+    pub weight: FontWeight,
+    /// Font style
+    pub style: FontStyle,
+    /// Underline style
+    pub underline: UnderlineStyle,
+    /// Strikethrough
+    pub strikethrough: bool,
+    /// Font color
+    pub color: Option<Color>,
+    /// Font family
+    pub family: Option<String>,
+}
+
+impl Font {
+    /// Create a new font
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set font name
+    pub fn with_name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// Set font size
+    pub fn with_size(mut self, size: f64) -> Self {
+        self.size = Some(size);
+        self
+    }
+
+    /// Set font weight
+    pub fn with_weight(mut self, weight: FontWeight) -> Self {
+        self.weight = weight;
+        self
+    }
+
+    /// Set font style
+    pub fn with_style(mut self, style: FontStyle) -> Self {
+        self.style = style;
+        self
+    }
+
+    /// Set underline
+    pub fn with_underline(mut self, underline: UnderlineStyle) -> Self {
+        self.underline = underline;
+        self
+    }
+
+    /// Set strikethrough
+    pub fn with_strikethrough(mut self, strikethrough: bool) -> Self {
+        self.strikethrough = strikethrough;
+        self
+    }
+
+    /// Set font color
+    pub fn with_color(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// Set font family
+    pub fn with_family(mut self, family: String) -> Self {
+        self.family = Some(family);
+        self
+    }
+
+    /// Check if font is bold
+    pub fn is_bold(&self) -> bool {
+        self.weight == FontWeight::Bold
+    }
+
+    /// Check if font is italic
+    pub fn is_italic(&self) -> bool {
+        self.style == FontStyle::Italic
+    }
+
+    /// Check if font has underline
+    pub fn has_underline(&self) -> bool {
+        self.underline != UnderlineStyle::None
+    }
+
+    /// Check if font has strikethrough
+    pub fn has_strikethrough(&self) -> bool {
+        self.strikethrough
+    }
+}
+
+/// A run of text with its own formatting within a rich text cell
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TextRun {
+    /// The text content of this run
+    pub text: String,
+    /// Font properties for this run (None means inherit cell default)
+    pub font: Option<Font>,
+}
+
+impl TextRun {
+    /// Create a new text run with just text (no formatting)
+    pub fn new(text: String) -> Self {
+        Self { text, font: None }
+    }
+
+    /// Create a new text run with text and font
+    pub fn with_font(text: String, font: Font) -> Self {
+        Self {
+            text,
+            font: Some(font),
+        }
+    }
+
+    /// Check if this run has any formatting
+    pub fn has_formatting(&self) -> bool {
+        self.font.is_some()
+    }
+}
+
+/// Rich text content with multiple formatted runs
+///
+/// Rich text allows different parts of a cell's text to have different
+/// formatting (bold, italic, colors, etc.). This is common in spreadsheets
+/// where users want to emphasize certain words within a cell.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RichText {
+    /// The text runs in order
+    pub runs: Vec<TextRun>,
+}
+
+impl RichText {
+    /// Create a new empty rich text
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create rich text from a vector of runs
+    pub fn from_runs(runs: Vec<TextRun>) -> Self {
+        Self { runs }
+    }
+
+    /// Add a text run
+    pub fn push(&mut self, run: TextRun) {
+        self.runs.push(run);
+    }
+
+    /// Add a plain text run (no formatting)
+    pub fn push_text(&mut self, text: String) {
+        self.runs.push(TextRun::new(text));
+    }
+
+    /// Add a formatted text run
+    pub fn push_formatted(&mut self, text: String, font: Font) {
+        self.runs.push(TextRun::with_font(text, font));
+    }
+
+    /// Get the plain text content (all runs concatenated)
+    pub fn plain_text(&self) -> String {
+        self.runs.iter().map(|r| r.text.as_str()).collect()
+    }
+
+    /// Check if the rich text is empty
+    pub fn is_empty(&self) -> bool {
+        self.runs.is_empty() || self.runs.iter().all(|r| r.text.is_empty())
+    }
+
+    /// Get the number of runs
+    pub fn len(&self) -> usize {
+        self.runs.len()
+    }
+
+    /// Check if any run has formatting
+    pub fn has_formatting(&self) -> bool {
+        self.runs.iter().any(|r| r.has_formatting())
+    }
+
+    /// Iterate over the runs
+    pub fn iter(&self) -> impl Iterator<Item = &TextRun> {
+        self.runs.iter()
+    }
+}
+
+impl std::fmt::Display for RichText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.plain_text())
+    }
+}
+
+/// Horizontal alignment
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum HorizontalAlignment {
+    /// Left alignment
+    Left,
+    /// Center alignment
+    Center,
+    /// Center across adjacent selected cells
+    CenterContinuous,
+    /// Right alignment
+    Right,
+    /// Justify alignment
+    Justify,
+    /// Distributed alignment
+    Distributed,
+    /// Fill alignment
+    Fill,
+    /// General alignment (default)
+    #[default]
+    General,
+}
+
+/// Vertical alignment
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum VerticalAlignment {
+    /// Top alignment
+    Top,
+    /// Center alignment
+    Center,
+    /// Bottom alignment
+    #[default]
+    Bottom,
+    /// Justify alignment
+    Justify,
+    /// Distributed alignment
+    Distributed,
+}
+
+/// Text rotation in degrees
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum TextRotation {
+    /// No rotation
+    #[default]
+    None,
+    /// Rotated by degrees (0-180)
+    Degrees(u16),
+    /// Stacked text
+    Stacked,
+}
+
+/// Cell alignment properties
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Alignment {
+    /// Horizontal alignment
+    pub horizontal: HorizontalAlignment,
+    /// Vertical alignment
+    pub vertical: VerticalAlignment,
+    /// Text rotation
+    pub text_rotation: TextRotation,
+    /// Wrap text
+    pub wrap_text: bool,
+    /// Indent level
+    pub indent: Option<u8>,
+    /// Shrink to fit
+    pub shrink_to_fit: bool,
+}
+
+impl Alignment {
+    /// Create new alignment
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set horizontal alignment
+    pub fn with_horizontal(mut self, horizontal: HorizontalAlignment) -> Self {
+        self.horizontal = horizontal;
+        self
+    }
+
+    /// Set vertical alignment
+    pub fn with_vertical(mut self, vertical: VerticalAlignment) -> Self {
+        self.vertical = vertical;
+        self
+    }
+
+    /// Set text rotation
+    pub fn with_text_rotation(mut self, rotation: TextRotation) -> Self {
+        self.text_rotation = rotation;
+        self
+    }
+
+    /// Set wrap text
+    pub fn with_wrap_text(mut self, wrap: bool) -> Self {
+        self.wrap_text = wrap;
+        self
+    }
+
+    /// Set indent level
+    pub fn with_indent(mut self, indent: u8) -> Self {
+        self.indent = Some(indent);
+        self
+    }
+
+    /// Set shrink to fit
+    pub fn with_shrink_to_fit(mut self, shrink: bool) -> Self {
+        self.shrink_to_fit = shrink;
+        self
+    }
+}
+
+/// Fill pattern type
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum FillPattern {
+    /// No fill
+    #[default]
+    None,
+    /// Solid fill
+    Solid,
+    /// Dark gray pattern
+    DarkGray,
+    /// Medium gray pattern
+    MediumGray,
+    /// Light gray pattern
+    LightGray,
+    /// Gray 125 pattern
+    Gray125,
+    /// Gray 0625 pattern
+    Gray0625,
+    /// Dark horizontal pattern
+    DarkHorizontal,
+    /// Dark vertical pattern
+    DarkVertical,
+    /// Dark down pattern
+    DarkDown,
+    /// Dark up pattern
+    DarkUp,
+    /// Dark grid pattern
+    DarkGrid,
+    /// Dark trellis pattern
+    DarkTrellis,
+    /// Light horizontal pattern
+    LightHorizontal,
+    /// Light vertical pattern
+    LightVertical,
+    /// Light down pattern
+    LightDown,
+    /// Light up pattern
+    LightUp,
+    /// Light grid pattern
+    LightGrid,
+    /// Light trellis pattern
+    LightTrellis,
+}
+
+/// Fill properties
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Fill {
+    /// Fill pattern
+    pub pattern: FillPattern,
+    /// Foreground color
+    pub foreground_color: Option<Color>,
+    /// Background color
+    pub background_color: Option<Color>,
+}
+
+impl Fill {
+    /// Create new fill
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create solid fill with color
+    pub fn solid(color: Color) -> Self {
+        Self {
+            pattern: FillPattern::Solid,
+            foreground_color: Some(color),
+            background_color: None,
+        }
+    }
+
+    /// Set pattern
+    pub fn with_pattern(mut self, pattern: FillPattern) -> Self {
+        self.pattern = pattern;
+        self
+    }
+
+    /// Set foreground color
+    pub fn with_foreground_color(mut self, color: Color) -> Self {
+        self.foreground_color = Some(color);
+        self
+    }
+
+    /// Set background color
+    pub fn with_background_color(mut self, color: Color) -> Self {
+        self.background_color = Some(color);
+        self
+    }
+
+    /// Check if fill is visible
+    pub fn is_visible(&self) -> bool {
+        self.pattern != FillPattern::None
+    }
+
+    /// Get the main fill color (foreground if available, otherwise background)
+    pub fn get_color(&self) -> Option<Color> {
+        self.foreground_color.or(self.background_color)
+    }
+}
+
+/// Number format
+#[derive(Debug, Clone, PartialEq)]
+pub struct NumberFormat {
+    /// Format code.
+    ///
+    /// Custom OOXML codes retain format-language escapes such as `\\` after
+    /// XML entities have been decoded, so callers can interpret or reproduce
+    /// the workbook format faithfully.
+    ///
+    /// This is empty when a workbook references a locale-reserved or unknown
+    /// built-in format ID. In that case, [`Self::format_id`] still preserves
+    /// the source identifier; an empty code must not be interpreted as
+    /// `General`.
+    pub format_code: String,
+    /// Format ID
+    pub format_id: Option<u32>,
+}
+
+impl NumberFormat {
+    /// Create new number format
+    pub fn new(format_code: String) -> Self {
+        Self {
+            format_code,
+            format_id: None,
+        }
+    }
+
+    /// Create with format ID
+    pub fn with_id(mut self, format_id: u32) -> Self {
+        self.format_id = Some(format_id);
+        self
+    }
+}
+
+impl Default for NumberFormat {
+    fn default() -> Self {
+        Self {
+            format_code: "General".to_string(),
+            format_id: None,
+        }
+    }
+}
+
+/// Cell protection properties
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Protection {
+    /// Cell is locked
+    pub locked: bool,
+    /// Cell is hidden
+    pub hidden: bool,
+}
+
+impl Protection {
+    /// Create new protection
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set locked
+    pub fn with_locked(mut self, locked: bool) -> Self {
+        self.locked = locked;
+        self
+    }
+
+    /// Set hidden
+    pub fn with_hidden(mut self, hidden: bool) -> Self {
+        self.hidden = hidden;
+        self
+    }
+}
+
+/// Column width information
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnWidth {
+    /// Column index (0-based)
+    pub column: u32,
+    /// Width in Excel units (characters)
+    pub width: f64,
+    /// Whether the width is custom (manually set)
+    pub custom_width: bool,
+    /// Whether the column is hidden
+    pub hidden: bool,
+    /// Best fit width
+    pub best_fit: bool,
+}
+
+impl ColumnWidth {
+    /// Create a new column width
+    pub fn new(column: u32, width: f64) -> Self {
+        Self {
+            column,
+            width,
+            custom_width: false,
+            hidden: false,
+            best_fit: false,
+        }
+    }
+
+    /// Set custom width flag
+    pub fn with_custom_width(mut self, custom: bool) -> Self {
+        self.custom_width = custom;
+        self
+    }
+
+    /// Set hidden flag
+    pub fn with_hidden(mut self, hidden: bool) -> Self {
+        self.hidden = hidden;
+        self
+    }
+
+    /// Set best fit flag
+    pub fn with_best_fit(mut self, best_fit: bool) -> Self {
+        self.best_fit = best_fit;
+        self
+    }
+
+    /// Check if column is visible
+    pub fn is_visible(&self) -> bool {
+        !self.hidden
+    }
+}
+
+/// Row height information
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowHeight {
+    /// Row index (0-based)
+    pub row: u32,
+    /// Height in points
+    pub height: f64,
+    /// Whether the height is custom (manually set)
+    pub custom_height: bool,
+    /// Whether the row is hidden
+    pub hidden: bool,
+    /// Thick top border
+    pub thick_top: bool,
+    /// Thick bottom border
+    pub thick_bottom: bool,
+}
+
+impl RowHeight {
+    /// Create a new row height
+    pub fn new(row: u32, height: f64) -> Self {
+        Self {
+            row,
+            height,
+            custom_height: false,
+            hidden: false,
+            thick_top: false,
+            thick_bottom: false,
+        }
+    }
+
+    /// Set custom height flag
+    pub fn with_custom_height(mut self, custom: bool) -> Self {
+        self.custom_height = custom;
+        self
+    }
+
+    /// Set hidden flag
+    pub fn with_hidden(mut self, hidden: bool) -> Self {
+        self.hidden = hidden;
+        self
+    }
+
+    /// Set thick top border
+    pub fn with_thick_top(mut self, thick_top: bool) -> Self {
+        self.thick_top = thick_top;
+        self
+    }
+
+    /// Set thick bottom border
+    pub fn with_thick_bottom(mut self, thick_bottom: bool) -> Self {
+        self.thick_bottom = thick_bottom;
+        self
+    }
+
+    /// Check if row is visible
+    pub fn is_visible(&self) -> bool {
+        !self.hidden
+    }
+}
+
+/// Worksheet layout information
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WorksheetLayout {
+    /// Column widths (keyed by column index)
+    pub column_widths: BTreeMap<u32, ColumnWidth>,
+    /// Row heights (keyed by row index)
+    pub row_heights: BTreeMap<u32, RowHeight>,
+    /// Default column width
+    pub default_column_width: Option<f64>,
+    /// Default row height
+    pub default_row_height: Option<f64>,
+}
+
+impl WorksheetLayout {
+    /// Create a new worksheet layout
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a column width
+    pub fn add_column_width(mut self, column_width: ColumnWidth) -> Self {
+        self.column_widths.insert(column_width.column, column_width);
+        self
+    }
+
+    /// Add a row height
+    pub fn add_row_height(mut self, row_height: RowHeight) -> Self {
+        self.row_heights.insert(row_height.row, row_height);
+        self
+    }
+
+    /// Set default column width
+    pub fn with_default_column_width(mut self, width: f64) -> Self {
+        self.default_column_width = Some(width);
+        self
+    }
+
+    /// Set default row height
+    pub fn with_default_row_height(mut self, height: f64) -> Self {
+        self.default_row_height = Some(height);
+        self
+    }
+
+    /// Get column width for a specific column (O(log n) lookup)
+    pub fn get_column_width(&self, column: u32) -> Option<&ColumnWidth> {
+        self.column_widths.get(&column)
+    }
+
+    /// Get row height for a specific row (O(log n) lookup)
+    pub fn get_row_height(&self, row: u32) -> Option<&RowHeight> {
+        self.row_heights.get(&row)
+    }
+
+    /// Get effective column width (custom or default).
+    ///
+    /// Returns the column width in Excel's character-based units. If no custom
+    /// width is set, returns the worksheet's default column width, or 8.43 if
+    /// no default is specified.
+    ///
+    /// **Note:** Excel column widths are stored in character units relative to
+    /// the workbook's default font, not pixels. Converting to pixels requires
+    /// font metrics and is font-dependent. The value 8.43 is Excel's standard
+    /// default for Calibri 11pt.
+    pub fn get_effective_column_width(&self, column: u32) -> f64 {
+        self.get_column_width(column)
+            .map(|cw| cw.width)
+            .or(self.default_column_width)
+            .unwrap_or(8.43)
+    }
+
+    /// Get effective row height (custom or default).
+    ///
+    /// Returns the row height in points. If no custom height is set, returns
+    /// the worksheet's default row height, or 15.0 if no default is specified.
+    ///
+    /// **Note:** Row heights in Excel are stored in points (1/72 inch), but
+    /// the actual displayed height may vary slightly depending on the default
+    /// font. The value 15.0 is Excel's standard default for Calibri 11pt.
+    pub fn get_effective_row_height(&self, row: u32) -> f64 {
+        self.get_row_height(row)
+            .map(|rh| rh.height)
+            .or(self.default_row_height)
+            .unwrap_or(15.0)
+    }
+
+    /// Check if layout has any custom dimensions
+    pub fn has_custom_dimensions(&self) -> bool {
+        !self.column_widths.is_empty()
+            || !self.row_heights.is_empty()
+            || self.default_column_width.is_some()
+            || self.default_row_height.is_some()
+    }
+}
+
+/// Complete cell style
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Style {
+    /// Font properties
+    pub font: Option<Font>,
+    /// Fill properties
+    pub fill: Option<Fill>,
+    /// Border properties
+    pub borders: Option<Borders>,
+    /// Alignment properties
+    pub alignment: Option<Alignment>,
+    /// Number format
+    pub number_format: Option<NumberFormat>,
+    /// Protection properties
+    pub protection: Option<Protection>,
+    /// Style ID (for internal use)
+    pub style_id: Option<u32>,
+}
+
+impl Style {
+    /// Create new style
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set font
+    pub fn with_font(mut self, font: Font) -> Self {
+        self.font = Some(font);
+        self
+    }
+
+    /// Set fill
+    pub fn with_fill(mut self, fill: Fill) -> Self {
+        self.fill = Some(fill);
+        self
+    }
+
+    /// Set borders
+    pub fn with_borders(mut self, borders: Borders) -> Self {
+        self.borders = Some(borders);
+        self
+    }
+
+    /// Set alignment
+    pub fn with_alignment(mut self, alignment: Alignment) -> Self {
+        self.alignment = Some(alignment);
+        self
+    }
+
+    /// Set number format
+    pub fn with_number_format(mut self, number_format: NumberFormat) -> Self {
+        self.number_format = Some(number_format);
+        self
+    }
+
+    /// Set protection
+    pub fn with_protection(mut self, protection: Protection) -> Self {
+        self.protection = Some(protection);
+        self
+    }
+
+    /// Set style ID
+    pub fn with_style_id(mut self, style_id: u32) -> Self {
+        self.style_id = Some(style_id);
+        self
+    }
+
+    /// Get font
+    pub fn get_font(&self) -> Option<&Font> {
+        self.font.as_ref()
+    }
+
+    /// Get fill
+    pub fn get_fill(&self) -> Option<&Fill> {
+        self.fill.as_ref()
+    }
+
+    /// Get borders
+    pub fn get_borders(&self) -> Option<&Borders> {
+        self.borders.as_ref()
+    }
+
+    /// Get alignment
+    pub fn get_alignment(&self) -> Option<&Alignment> {
+        self.alignment.as_ref()
+    }
+
+    /// Get number format
+    pub fn get_number_format(&self) -> Option<&NumberFormat> {
+        self.number_format.as_ref()
+    }
+
+    /// Get protection
+    pub fn get_protection(&self) -> Option<&Protection> {
+        self.protection.as_ref()
+    }
+
+    /// Check if style is empty (no properties set)
+    pub fn is_empty(&self) -> bool {
+        self.font.is_none()
+            && self.fill.is_none()
+            && self.borders.is_none()
+            && self.alignment.is_none()
+            && self.number_format.is_none()
+            && self.protection.is_none()
+    }
+
+    /// Check if style has any visible properties
+    pub fn has_visible_properties(&self) -> bool {
+        (self.font.as_ref().is_some_and(|f| {
+            f.name.is_some()
+                || f.size.is_some()
+                || f.color.is_some()
+                || f.family.is_some()
+                || f.is_bold()
+                || f.is_italic()
+                || f.has_underline()
+                || f.has_strikethrough()
+        })) || (self.fill.as_ref().is_some_and(|f| f.is_visible()))
+            || (self
+                .borders
+                .as_ref()
+                .is_some_and(|b| b.has_visible_borders()))
+            || (self.alignment.as_ref().is_some_and(|a| {
+                a.horizontal != HorizontalAlignment::General
+                    || a.vertical != VerticalAlignment::Bottom
+                    || a.text_rotation != TextRotation::None
+                    || a.wrap_text
+                    || a.indent.is_some()
+                    || a.shrink_to_fit
+            }))
+            || self.number_format.is_some()
+    }
+}
+
+/// A run of consecutive cells with the same style (row-major order)
+#[derive(Debug, Clone)]
+struct StyleRun {
+    /// Index into the palette (0 = no style/default)
+    style_id: u32,
+    /// Number of consecutive cells with this style
+    count: u32,
+}
+
+fn push_style_run(runs: &mut Vec<StyleRun>, style_id: u32, mut count: u64) {
+    if count == 0 {
+        return;
+    }
+
+    if let Some(last) = runs.last_mut() {
+        if last.style_id == style_id {
+            let available = u64::from(u32::MAX - last.count);
+            let additional = count.min(available);
+            last.count += additional as u32;
+            count -= additional;
+        }
+    }
+
+    while count > 0 {
+        let chunk = count.min(u64::from(u32::MAX));
+        runs.push(StyleRun {
+            style_id,
+            count: chunk as u32,
+        });
+        count -= chunk;
+    }
+}
+
+fn build_run_ends(runs: &[StyleRun]) -> Vec<u64> {
+    let mut run_ends = Vec::with_capacity(runs.len());
+    let mut end = 0u64;
+
+    for run in runs {
+        end += u64::from(run.count);
+        run_ends.push(end);
+    }
+
+    run_ends
+}
+
+/// RLE-compressed style storage for a worksheet range.
+///
+/// Instead of storing one Style per cell (which wastes memory when many cells
+/// share the same style), this stores:
+/// - A palette of unique styles
+/// - Runs of consecutive cells (row-major) that share the same style
+///
+/// This dramatically reduces memory usage and clone overhead for large worksheets.
+#[derive(Debug, Clone, Default)]
+pub struct StyleRange {
+    start: (u32, u32),
+    end: (u32, u32),
+    /// Palette of unique styles. Index 0 is reserved for "no style" (empty).
+    palette: Vec<Style>,
+    /// RLE-encoded runs in row-major order
+    runs: Vec<StyleRun>,
+    /// Exclusive cumulative cell offset for each RLE run
+    run_ends: Vec<u64>,
+    /// Total cell count (for validation)
+    total_cells: u64,
+}
+
+impl StyleRange {
+    /// Create an empty StyleRange
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Create a StyleRange from style IDs and a palette without cloning styles.
+    ///
+    /// This is more efficient than `from_sparse` when the caller already has a
+    /// palette. Input IDs are zero-based indexes into that palette; the range
+    /// reserves a separate internal entry for synthesized sparse gaps. Invalid
+    /// input IDs are treated as unstyled cells.
+    ///
+    /// - `cells`: Vec of (row, col, style_id) where style_id indexes into palette
+    /// - `palette`: The shared palette of unique styles (taken ownership)
+    pub fn from_style_ids(cells: Vec<(u32, u32, usize)>, palette: Vec<Style>) -> Self {
+        if cells.is_empty() {
+            return Self::empty();
+        }
+
+        // StyleRun ID 0 is reserved for synthesized sparse gaps. Workbook
+        // cellXfs IDs are also zero-based, so shift every valid workbook
+        // palette index by one instead of allowing real style 0 to fill gaps.
+        // `u32` run IDs avoid aliasing distinct styles at the old u16 ceiling
+        // without doubling each run's footprint on 64-bit targets.
+        let workbook_palette_len = palette.len();
+        let mut range_palette = Vec::with_capacity(workbook_palette_len.saturating_add(1));
+        range_palette.push(Style::default());
+        range_palette.extend(palette);
+
+        let mut row_start = u32::MAX;
+        let mut row_end = 0;
+        let mut col_start = u32::MAX;
+        let mut col_end = 0;
+        for (row, column, _) in &cells {
+            row_start = row_start.min(*row);
+            row_end = row_end.max(*row);
+            col_start = col_start.min(*column);
+            col_end = col_end.max(*column);
+        }
+
+        let width = u64::from(col_end - col_start + 1);
+        let height = u64::from(row_end - row_start + 1);
+        let total_cells = width * height;
+
+        // Retain only explicitly styled positions. A BTreeMap preserves row-major
+        // order and gives duplicate positions the same last-write behavior as the
+        // previous dense temporary.
+        let mut sparse_ids = BTreeMap::new();
+        for (row, column, style_id) in cells {
+            let relative_row = u64::from(row - row_start);
+            let relative_column = u64::from(column - col_start);
+            let linear_index = relative_row * width + relative_column;
+            let range_style_id = if style_id < workbook_palette_len && style_id < u32::MAX as usize
+            {
+                // Slot zero is reserved, so the largest representable source
+                // palette index is u32::MAX - 1. Larger theoretical palettes
+                // degrade to the unstyled slot instead of aliasing an ID.
+                style_id as u32 + 1
+            } else {
+                // Invalid external palette references degrade to an unstyled
+                // cell instead of aliasing another style or ending iteration.
+                0
+            };
+            sparse_ids.insert(linear_index, range_style_id);
+        }
+
+        // Construct zero/style runs directly from sparse positions. Large gaps are
+        // split because the wire representation deliberately uses u32 run lengths.
+        let mut runs = Vec::new();
+        let mut cursor = 0u64;
+        for (linear_index, style_id) in sparse_ids {
+            push_style_run(&mut runs, 0, linear_index - cursor);
+            push_style_run(&mut runs, style_id, 1);
+            cursor = linear_index + 1;
+        }
+        push_style_run(&mut runs, 0, total_cells - cursor);
+        runs.shrink_to_fit();
+        let run_ends = build_run_ends(&runs);
+        debug_assert_eq!(run_ends.last().copied(), Some(total_cells));
+
+        StyleRange {
+            start: (row_start, col_start),
+            end: (row_end, col_end),
+            palette: range_palette,
+            runs,
+            run_ends,
+            total_cells,
+        }
+    }
+
+    /// Create a StyleRange from sparse cell data
+    ///
+    /// Takes cells with positions and styles, compresses into RLE format.
+    pub fn from_sparse(cells: Vec<(u32, u32, Style)>) -> Self {
+        if cells.is_empty() {
+            return Self::empty();
+        }
+
+        // Build the compact palette first, then let from_style_ids construct runs
+        // without allocating the full worksheet bounding rectangle.
+        let mut palette: Vec<Style> = Vec::new();
+        let mut style_to_id: std::collections::HashMap<u32, usize> =
+            std::collections::HashMap::new();
+        let mut style_cells = Vec::with_capacity(cells.len());
+
+        for (row, column, style) in cells {
+            if style.is_empty() {
+                // Keep the cell in the bounds calculation while mapping it to
+                // the reserved gap/default entry in `from_style_ids`.
+                style_cells.push((row, column, usize::MAX));
+                continue;
+            }
+
+            // Use Excel's style_id when one is available. Id-less styles are
+            // deliberately kept distinct and must not manufacture a key from
+            // the palette length: that synthetic key could collide with a real
+            // workbook style ID encountered later.
+            let style_id = if let Some(excel_style_id) = style.style_id {
+                if let Some(&id) = style_to_id.get(&excel_style_id) {
+                    id
+                } else {
+                    let id = palette.len();
+                    palette.push(style);
+                    style_to_id.insert(excel_style_id, id);
+                    id
+                }
+            } else {
+                let id = palette.len();
+                palette.push(style);
+                id
+            };
+            style_cells.push((row, column, style_id));
+        }
+
+        Self::from_style_ids(style_cells, palette)
+    }
+
+    /// Get the start position of the range
+    pub fn start(&self) -> Option<(u32, u32)> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(self.start)
+        }
+    }
+
+    /// Get the end position of the range
+    pub fn end(&self) -> Option<(u32, u32)> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(self.end)
+        }
+    }
+
+    /// Check if the range is empty
+    pub fn is_empty(&self) -> bool {
+        self.runs.is_empty()
+    }
+
+    /// Get width of the range
+    pub fn width(&self) -> usize {
+        if self.is_empty() {
+            0
+        } else {
+            (self.end.1 - self.start.1 + 1) as usize
+        }
+    }
+
+    /// Get height of the range
+    pub fn height(&self) -> usize {
+        if self.is_empty() {
+            0
+        } else {
+            (self.end.0 - self.start.0 + 1) as usize
+        }
+    }
+
+    /// Get style at a position (relative to range start)
+    ///
+    /// Returns None if position is out of bounds, or reference to style.
+    pub fn get(&self, pos: (usize, usize)) -> Option<&Style> {
+        let width = self.width();
+        let height = self.height();
+
+        if pos.0 >= height || pos.1 >= width {
+            return None;
+        }
+
+        let linear_idx = pos.0 as u64 * width as u64 + pos.1 as u64;
+        let style_id = self.style_id_at(linear_idx)?;
+        self.palette.get(style_id as usize)
+    }
+
+    /// Get style ID at a linear index using binary search on run end offsets
+    fn style_id_at(&self, linear_idx: u64) -> Option<u32> {
+        let run_idx = self
+            .run_ends
+            .partition_point(|&run_end| run_end <= linear_idx);
+        self.runs.get(run_idx).map(|run| run.style_id)
+    }
+
+    /// Iterate over all cells with their positions and styles
+    pub fn cells(&self) -> StyleRangeCells<'_> {
+        StyleRangeCells {
+            range: self,
+            run_idx: 0,
+            run_offset: 0,
+            linear_idx: 0,
+        }
+    }
+
+    /// Get number of unique styles (excluding empty)
+    pub fn unique_style_count(&self) -> usize {
+        self.palette.len().saturating_sub(1)
+    }
+
+    /// Get number of RLE runs (for diagnostics)
+    pub fn run_count(&self) -> usize {
+        self.runs.len()
+    }
+
+    /// Get compression ratio (cells / runs)
+    pub fn compression_ratio(&self) -> f64 {
+        if self.runs.is_empty() {
+            0.0
+        } else {
+            self.total_cells as f64 / self.runs.len() as f64
+        }
+    }
+}
+
+/// Iterator over cells in a StyleRange
+pub struct StyleRangeCells<'a> {
+    range: &'a StyleRange,
+    run_idx: usize,
+    run_offset: u32,
+    linear_idx: u64,
+}
+
+impl<'a> Iterator for StyleRangeCells<'a> {
+    type Item = (usize, usize, &'a Style);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.run_idx >= self.range.runs.len() {
+            return None;
+        }
+
+        let width = self.range.width();
+        if width == 0 {
+            return None;
+        }
+
+        let row = (self.linear_idx / width as u64) as usize;
+        let col = (self.linear_idx % width as u64) as usize;
+
+        let run = &self.range.runs[self.run_idx];
+        let style = self.range.palette.get(run.style_id as usize)?;
+
+        self.linear_idx += 1;
+        self.run_offset += 1;
+
+        if self.run_offset >= run.count {
+            self.run_idx += 1;
+            self.run_offset = 0;
+        }
+
+        Some((row, col, style))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_color() {
+        let color = Color::rgb(255, 0, 128);
+        assert_eq!(color.red, 255);
+        assert_eq!(color.green, 0);
+        assert_eq!(color.blue, 128);
+        assert_eq!(color.alpha, 255);
+        assert_eq!(color.to_string(), "#FF0080");
+    }
+
+    #[test]
+    fn test_font() {
+        let font = Font::new()
+            .with_name("Arial".to_string())
+            .with_size(12.0)
+            .with_weight(FontWeight::Bold)
+            .with_color(Color::rgb(255, 0, 0));
+
+        assert_eq!(font.name, Some("Arial".to_string()));
+        assert_eq!(font.size, Some(12.0));
+        assert!(font.is_bold());
+        assert_eq!(font.color, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn test_style() {
+        let style = Style::new()
+            .with_font(Font::new().with_name("Arial".to_string()))
+            .with_fill(Fill::solid(Color::rgb(255, 255, 0)));
+
+        assert!(!style.is_empty());
+        assert!(style.get_font().is_some());
+        assert!(style.get_fill().is_some());
+    }
+
+    #[test]
+    fn test_visible_properties_include_all_rendered_font_and_number_formats() {
+        let font_styles = [
+            Font::new().with_name("Aptos".to_string()),
+            Font::new().with_size(11.0),
+            Font::new().with_family("Swiss".to_string()),
+            Font::new().with_underline(UnderlineStyle::Single),
+            Font::new().with_strikethrough(true),
+        ];
+
+        for font in font_styles {
+            assert!(Style::new().with_font(font).has_visible_properties());
+        }
+        assert!(Style::new()
+            .with_number_format(NumberFormat::new("0.00%".to_string()))
+            .has_visible_properties());
+        assert!(!Style::new().has_visible_properties());
+        assert!(!Style::new().with_font(Font::new()).has_visible_properties());
+    }
+
+    #[test]
+    fn test_border_with_color() {
+        let border = Border::with_color(BorderStyle::Thin, Color::rgb(255, 0, 0));
+        assert_eq!(border.style, BorderStyle::Thin);
+        assert_eq!(border.color, Some(Color::rgb(255, 0, 0)));
+        assert!(border.is_visible());
+    }
+
+    #[test]
+    fn test_border_without_color() {
+        let border = Border::new(BorderStyle::Medium);
+        assert_eq!(border.style, BorderStyle::Medium);
+        assert_eq!(border.color, None);
+        assert!(border.is_visible());
+    }
+
+    #[test]
+    fn test_borders_with_mixed_colors() {
+        let mut borders = Borders::new();
+        borders.left = Border::with_color(BorderStyle::Thin, Color::rgb(255, 0, 0));
+        borders.right = Border::new(BorderStyle::Medium);
+        borders.top = Border::with_color(BorderStyle::Thick, Color::rgb(0, 255, 0));
+
+        assert_eq!(borders.left.color, Some(Color::rgb(255, 0, 0)));
+        assert_eq!(borders.right.color, None);
+        assert_eq!(borders.top.color, Some(Color::rgb(0, 255, 0)));
+        assert!(borders.has_visible_borders());
+    }
+
+    #[test]
+    fn test_column_width() {
+        let column_width = ColumnWidth::new(5, 12.5)
+            .with_custom_width(true)
+            .with_hidden(false)
+            .with_best_fit(true);
+
+        assert_eq!(column_width.column, 5);
+        assert_eq!(column_width.width, 12.5);
+        assert!(column_width.custom_width);
+        assert!(!column_width.hidden);
+        assert!(column_width.best_fit);
+        assert!(column_width.is_visible());
+    }
+
+    #[test]
+    fn test_row_height() {
+        let row_height = RowHeight::new(10, 20.0)
+            .with_custom_height(true)
+            .with_hidden(false)
+            .with_thick_top(true)
+            .with_thick_bottom(false);
+
+        assert_eq!(row_height.row, 10);
+        assert_eq!(row_height.height, 20.0);
+        assert!(row_height.custom_height);
+        assert!(!row_height.hidden);
+        assert!(row_height.thick_top);
+        assert!(!row_height.thick_bottom);
+        assert!(row_height.is_visible());
+    }
+
+    #[test]
+    fn test_worksheet_layout() {
+        let layout = WorksheetLayout::new()
+            .add_column_width(ColumnWidth::new(0, 10.0))
+            .add_column_width(ColumnWidth::new(1, 15.0))
+            .add_row_height(RowHeight::new(0, 18.0))
+            .add_row_height(RowHeight::new(1, 22.0))
+            .with_default_column_width(8.43)
+            .with_default_row_height(15.0);
+
+        assert_eq!(layout.column_widths.len(), 2);
+        assert_eq!(layout.row_heights.len(), 2);
+        assert_eq!(layout.default_column_width, Some(8.43));
+        assert_eq!(layout.default_row_height, Some(15.0));
+        assert!(layout.has_custom_dimensions());
+
+        // Test getting specific column width
+        let col_width = layout.get_column_width(0).unwrap();
+        assert_eq!(col_width.width, 10.0);
+
+        // Test getting specific row height
+        let row_height = layout.get_row_height(1).unwrap();
+        assert_eq!(row_height.height, 22.0);
+
+        // Test effective widths/heights
+        assert_eq!(layout.get_effective_column_width(0), 10.0); // Custom width
+        assert_eq!(layout.get_effective_column_width(5), 8.43); // Default width
+        assert_eq!(layout.get_effective_row_height(0), 18.0); // Custom height
+        assert_eq!(layout.get_effective_row_height(5), 15.0); // Default height
+    }
+
+    #[test]
+    fn test_worksheet_layout_defaults() {
+        let layout = WorksheetLayout::new();
+
+        assert!(!layout.has_custom_dimensions());
+        assert_eq!(layout.get_effective_column_width(0), 8.43); // Excel default
+        assert_eq!(layout.get_effective_row_height(0), 15.0); // Excel default
+    }
+
+    #[test]
+    fn test_sparse_style_range_avoids_dense_extreme_bounds() {
+        let styled = Style::new().with_font(Font::new().with_name("Endpoint".to_string()));
+        let range = StyleRange::from_style_ids(
+            vec![(0, 0, 1), (1_048_575, 16_383, 1)],
+            vec![Style::default(), styled.clone()],
+        );
+
+        assert_eq!(range.width(), 16_384);
+        assert_eq!(range.height(), 1_048_576);
+        assert_eq!(range.total_cells, 17_179_869_184);
+        assert_eq!(range.run_count(), 7);
+        assert_eq!(range.get((0, 0)), Some(&styled));
+        assert_eq!(range.get((0, 1)), Some(&Style::default()));
+        assert_eq!(range.get((1_048_575, 16_383)), Some(&styled));
+    }
+
+    #[test]
+    fn test_workbook_style_zero_does_not_fill_sparse_gaps() {
+        let style_zero = Style::new().with_font(Font::new().with_name("CellXfs 0".to_string()));
+        let range =
+            StyleRange::from_style_ids(vec![(3, 4, 0), (3, 6, 0)], vec![style_zero.clone()]);
+
+        assert_eq!(range.start(), Some((3, 4)));
+        assert_eq!(range.get((0, 0)), Some(&style_zero));
+        assert_eq!(range.get((0, 1)), Some(&Style::default()));
+        assert_eq!(range.get((0, 2)), Some(&style_zero));
+        assert_eq!(range.unique_style_count(), 1);
+    }
+
+    #[test]
+    fn test_workbook_style_ids_are_not_truncated_at_u16_max() {
+        let high_style_id = usize::from(u16::MAX);
+        let high_style = Style::new().with_font(Font::new().with_name("High ID".to_string()));
+        let mut palette = vec![Style::default(); high_style_id + 1];
+        palette[high_style_id] = high_style.clone();
+
+        let range = StyleRange::from_style_ids(vec![(0, 0, high_style_id)], palette);
+
+        assert_eq!(range.get((0, 0)), Some(&high_style));
+    }
+
+    #[test]
+    fn test_idless_style_does_not_alias_real_style_id() {
+        let idless = Style::new().with_font(Font::new().with_name("Idless".to_string()));
+        let real_id = Style::new()
+            .with_font(Font::new().with_name("Workbook style 1".to_string()))
+            .with_style_id(1);
+
+        let range = StyleRange::from_sparse(vec![(0, 0, idless.clone()), (0, 1, real_id.clone())]);
+
+        assert_eq!(range.get((0, 0)), Some(&idless));
+        assert_eq!(range.get((0, 1)), Some(&real_id));
+        assert_eq!(range.unique_style_count(), 2);
+    }
+
+    #[test]
+    fn test_style_range_random_access_across_many_run_boundaries() {
+        const CELL_COUNT: u32 = 4_096;
+
+        let even = Style::new().with_font(Font::new().with_name("Even".to_string()));
+        let odd = Style::new().with_font(Font::new().with_name("Odd".to_string()));
+        let cells = (0..CELL_COUNT)
+            .map(|column| (0, column, (column % 2) as usize))
+            .collect();
+        let range = StyleRange::from_style_ids(cells, vec![even.clone(), odd.clone()]);
+
+        assert_eq!(range.run_count(), CELL_COUNT as usize);
+        assert_eq!(range.run_ends.len(), range.run_count());
+        assert_eq!(range.run_ends.first(), Some(&1));
+        assert_eq!(range.run_ends.last(), Some(&u64::from(CELL_COUNT)));
+
+        for column in [0, 1, 2_047, 2_048, 4_094, 4_095] {
+            let expected = if column % 2 == 0 { &even } else { &odd };
+            assert_eq!(range.get((0, column)), Some(expected));
+        }
+        for (row, column, iterated_style) in range.cells() {
+            assert_eq!(range.get((row, column)), Some(iterated_style));
+        }
+
+        assert_eq!(range.style_id_at(0), Some(1));
+        assert_eq!(range.style_id_at(1), Some(2));
+        assert_eq!(range.style_id_at(u64::from(CELL_COUNT - 1)), Some(2));
+        assert_eq!(range.style_id_at(u64::from(CELL_COUNT)), None);
+        assert_eq!(range.get((0, CELL_COUNT as usize)), None);
+        assert_eq!(StyleRange::empty().style_id_at(0), None);
+    }
+}

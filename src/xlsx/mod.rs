@@ -5,6 +5,7 @@
 #![warn(missing_docs)]
 
 mod cells_reader;
+mod style_parser;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -25,11 +26,15 @@ use zip::result::ZipError;
 
 use crate::datatype::DataRef;
 use crate::formats::{builtin_format_by_id, detect_custom_number_format, CellFormat};
+use crate::style::{
+    ColumnWidth, Font, FontStyle, FontWeight, RichText, RowHeight, StyleRange, TextRun,
+    UnderlineStyle, WorksheetLayout,
+};
 use crate::utils::{unescape_entity_to_buffer, unescape_xml};
 use crate::vba::VbaProject;
 use crate::{
     Cell, CellErrorType, Data, Dimensions, HeaderRow, Metadata, Range, Reader, ReaderRef, Sheet,
-    SheetType, SheetVisible, Table,
+    SheetType, SheetVisible, Style, Table,
 };
 pub use cells_reader::XlsxCellReader;
 
@@ -40,6 +45,348 @@ pub const MAX_ROWS: u32 = 1_048_576;
 
 /// Maximum number of columns allowed in an XLSX file.
 pub const MAX_COLUMNS: u32 = 16_384;
+
+const DEFAULT_COLUMN_WIDTH: f64 = 8.43;
+const DEFAULT_ROW_HEIGHT: f64 = 15.0;
+
+fn theme_slot(name: &[u8]) -> Option<usize> {
+    match name {
+        // SpreadsheetML's numeric theme indices use the effective display
+        // order, which swaps each lt/dk pair from clrScheme's XML child order.
+        b"lt1" => Some(0),
+        b"dk1" => Some(1),
+        b"lt2" => Some(2),
+        b"dk2" => Some(3),
+        b"accent1" => Some(4),
+        b"accent2" => Some(5),
+        b"accent3" => Some(6),
+        b"accent4" => Some(7),
+        b"accent5" => Some(8),
+        b"accent6" => Some(9),
+        b"hlink" => Some(10),
+        b"folHlink" => Some(11),
+        _ => None,
+    }
+}
+
+fn resolve_workbook_relationship_target(target: &str) -> Result<String, XlsxError> {
+    let normalized = target.replace('\\', "/");
+    let combined = if let Some(absolute) = normalized.strip_prefix('/') {
+        absolute.to_string()
+    } else {
+        format!("xl/{normalized}")
+    };
+    let mut components = Vec::new();
+    for component in combined.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if components.pop().is_none() {
+                    return Err(XlsxError::Unexpected("invalid workbook relationship path"));
+                }
+            }
+            value => components.push(value),
+        }
+    }
+    if components.is_empty() {
+        return Err(XlsxError::Unexpected("invalid workbook relationship path"));
+    }
+    Ok(components.join("/"))
+}
+
+fn zip_contains_path<RS: Read + Seek>(zip: &ZipArchive<RS>, path: &str) -> bool {
+    zip.file_names().any(|zip_path| {
+        let normalized_path = zip_path.replace('\\', "/");
+        path.eq_ignore_ascii_case(&normalized_path)
+    })
+}
+
+/// Preserve support for producers that write root-relative `xl/...` targets
+/// without the leading slash, but only when the standards-relative target is
+/// absent and the root-relative part actually exists in the package.
+fn legacy_rootish_workbook_target<RS: Read + Seek>(
+    zip: &ZipArchive<RS>,
+    target: &str,
+) -> Option<String> {
+    let normalized = target.replace('\\', "/");
+    if normalized.starts_with('/') || !normalized.starts_with("xl/") {
+        return None;
+    }
+    let standards_relative = resolve_workbook_relationship_target(&normalized).ok()?;
+    if zip_contains_path(zip, &standards_relative) {
+        return None;
+    }
+    let rootish = resolve_workbook_relationship_target(&format!("/{normalized}")).ok()?;
+    zip_contains_path(zip, &rootish).then_some(rootish)
+}
+
+fn parse_theme_rgb(value: &[u8]) -> Result<crate::Color, XlsxError> {
+    if value.len() != 6 {
+        return Err(XlsxError::Unexpected("invalid theme RGB color"));
+    }
+    let component = |range: std::ops::Range<usize>| {
+        u8::from_str_radix(
+            std::str::from_utf8(&value[range])
+                .map_err(|_| XlsxError::Unexpected("invalid theme RGB color"))?,
+            16,
+        )
+        .map_err(|_| XlsxError::Unexpected("invalid theme RGB color"))
+    };
+    Ok(crate::Color::rgb(
+        component(0..2)?,
+        component(2..4)?,
+        component(4..6)?,
+    ))
+}
+
+/// Return the locale-independent built-in format code for an OOXML format ID.
+///
+/// Only IDs whose format code is defined identically for all languages are
+/// returned. Locale-dependent or unassigned IDs (including 5-8, 23-36,
+/// 41-44, and values above 49) retain their numeric ID with an empty code
+/// rather than being mislabeled with a US-specific format or `General`.
+fn builtin_number_format_code(format_id: u32) -> Option<&'static str> {
+    match format_id {
+        0 => Some("General"),
+        1 => Some("0"),
+        2 => Some("0.00"),
+        3 => Some("#,##0"),
+        4 => Some("#,##0.00"),
+        9 => Some("0%"),
+        10 => Some("0.00%"),
+        11 => Some("0.00E+00"),
+        12 => Some("# ?/?"),
+        13 => Some("# ??/??"),
+        14 => Some("mm-dd-yy"),
+        15 => Some("d-mmm-yy"),
+        16 => Some("d-mmm"),
+        17 => Some("mmm-yy"),
+        18 => Some("h:mm AM/PM"),
+        19 => Some("h:mm:ss AM/PM"),
+        20 => Some("h:mm"),
+        21 => Some("h:mm:ss"),
+        22 => Some("m/d/yy h:mm"),
+        37 => Some("#,##0 ;(#,##0)"),
+        38 => Some("#,##0 ;[Red](#,##0)"),
+        39 => Some("#,##0.00;(#,##0.00)"),
+        40 => Some("#,##0.00;[Red](#,##0.00)"),
+        45 => Some("mm:ss"),
+        46 => Some("[h]:mm:ss"),
+        47 => Some("mmss.0"),
+        48 => Some("##0.0E+0"),
+        49 => Some("@"),
+        _ => None,
+    }
+}
+
+fn worksheet_column_span(
+    min_column: u32,
+    max_column: Option<u32>,
+) -> Result<std::ops::RangeInclusive<u32>, XlsxError> {
+    let max_column = max_column.unwrap_or(min_column);
+    if min_column == 0 || max_column < min_column || max_column > MAX_COLUMNS {
+        return Err(XlsxError::Unexpected("invalid worksheet column bounds"));
+    }
+    Ok((min_column - 1)..=(max_column - 1))
+}
+
+fn compact_worksheet_style_palette(
+    cells: &mut [(u32, u32, usize)],
+    workbook_palette: &[Style],
+) -> Vec<Style> {
+    let mut workbook_to_worksheet = HashMap::new();
+    let mut worksheet_palette = Vec::new();
+
+    for (_, _, style_id) in cells {
+        let workbook_style_id = *style_id;
+        let worksheet_style_id =
+            if let Some(&worksheet_style_id) = workbook_to_worksheet.get(&workbook_style_id) {
+                worksheet_style_id
+            } else if let Some(style) = workbook_palette.get(workbook_style_id) {
+                let worksheet_style_id = worksheet_palette.len();
+                worksheet_palette.push(style.clone());
+                workbook_to_worksheet.insert(workbook_style_id, worksheet_style_id);
+                worksheet_style_id
+            } else {
+                // The streaming reader currently filters invalid IDs. Keep this
+                // helper defensive so a future caller cannot alias one to a valid
+                // compact palette entry.
+                usize::MAX
+            };
+
+        *style_id = worksheet_style_id;
+    }
+
+    worksheet_palette
+}
+
+fn parse_xf_record<R: std::io::BufRead>(
+    xml: &mut XmlReader<R>,
+    start: &BytesStart<'_>,
+    number_formats: &BTreeMap<Vec<u8>, String>,
+    fonts: &[Font],
+    fills: &[crate::Fill],
+    borders: &[crate::Borders],
+    base_xfs: (&[Style], &[CellFormat]),
+) -> Result<(Style, CellFormat), XlsxError> {
+    let mut base_style_id = None;
+    let mut num_fmt_id_bytes: Option<Vec<u8>> = None;
+    let mut font_id = None;
+    let mut fill_id = None;
+    let mut border_id = None;
+    // Preserve this branch's historical behavior when an apply flag is
+    // omitted, but honor an explicit false value by retaining the base XF.
+    let mut apply_font = true;
+    let mut apply_fill = true;
+    let mut apply_border = true;
+    let mut apply_number_format = true;
+    let mut apply_alignment = true;
+    let mut apply_protection = true;
+
+    for attribute in start.attributes() {
+        let attribute = attribute?;
+        match attribute.key.as_ref() {
+            b"xfId" => {
+                base_style_id = xml
+                    .decoder()
+                    .decode(&attribute.value)?
+                    .parse::<usize>()
+                    .ok();
+            }
+            b"fontId" => {
+                font_id = xml
+                    .decoder()
+                    .decode(&attribute.value)?
+                    .parse::<usize>()
+                    .ok();
+            }
+            b"fillId" => {
+                fill_id = xml
+                    .decoder()
+                    .decode(&attribute.value)?
+                    .parse::<usize>()
+                    .ok();
+            }
+            b"borderId" => {
+                border_id = xml
+                    .decoder()
+                    .decode(&attribute.value)?
+                    .parse::<usize>()
+                    .ok();
+            }
+            b"numFmtId" => num_fmt_id_bytes = Some(attribute.value.to_vec()),
+            b"applyFont" => {
+                apply_font = style_parser::parse_ooxml_bool(&attribute.value)?;
+            }
+            b"applyFill" => {
+                apply_fill = style_parser::parse_ooxml_bool(&attribute.value)?;
+            }
+            b"applyBorder" => {
+                apply_border = style_parser::parse_ooxml_bool(&attribute.value)?;
+            }
+            b"applyNumberFormat" => {
+                apply_number_format = style_parser::parse_ooxml_bool(&attribute.value)?;
+            }
+            b"applyAlignment" => {
+                apply_alignment = style_parser::parse_ooxml_bool(&attribute.value)?;
+            }
+            b"applyProtection" => {
+                apply_protection = style_parser::parse_ooxml_bool(&attribute.value)?;
+            }
+            _ => {}
+        }
+    }
+
+    let mut style = base_style_id
+        .and_then(|style_id| base_xfs.0.get(style_id))
+        .cloned()
+        .unwrap_or_default();
+    let mut cell_format = base_style_id
+        .and_then(|style_id| base_xfs.1.get(style_id))
+        .copied()
+        .unwrap_or(CellFormat::Other);
+
+    if apply_font {
+        if let Some(font) = font_id.and_then(|id| fonts.get(id)) {
+            style = style.with_font(font.clone());
+        }
+    }
+    if apply_fill {
+        if let Some(fill) = fill_id.and_then(|id| fills.get(id)) {
+            style = style.with_fill(fill.clone());
+        }
+    }
+    if apply_border {
+        if let Some(border) = border_id.and_then(|id| borders.get(id)) {
+            style = style.with_borders(border.clone());
+        }
+    }
+
+    if apply_number_format {
+        if let Some(id_bytes) = num_fmt_id_bytes.as_ref() {
+            if let Ok(num_fmt_id) = xml.decoder().decode(id_bytes)?.parse::<u32>() {
+                let format_code = match number_formats.get(id_bytes) {
+                    Some(raw) => raw.clone(),
+                    None => builtin_number_format_code(num_fmt_id)
+                        .unwrap_or_default()
+                        .to_string(),
+                };
+                style = style.with_number_format(
+                    crate::style::NumberFormat::new(format_code).with_id(num_fmt_id),
+                );
+                cell_format = match number_formats.get(id_bytes) {
+                    Some(raw) => detect_custom_number_format(raw),
+                    None => builtin_format_by_id(id_bytes),
+                };
+            }
+        }
+    }
+
+    let mut nested_buf = Vec::with_capacity(512);
+    loop {
+        nested_buf.clear();
+        match xml.read_event_into(&mut nested_buf) {
+            Ok(Event::Start(ref nested)) => match nested.local_name().as_ref() {
+                b"alignment" => {
+                    let alignment = style_parser::parse_alignment(xml, nested)?;
+                    if apply_alignment {
+                        style = style.with_alignment(alignment);
+                    }
+                }
+                b"protection" => {
+                    let protection = style_parser::parse_protection(xml, nested)?;
+                    if apply_protection {
+                        style = style.with_protection(protection);
+                    }
+                }
+                _ => {
+                    xml.read_to_end_into(nested.name(), &mut Vec::new())?;
+                }
+            },
+            Ok(Event::Empty(ref nested)) => match nested.local_name().as_ref() {
+                b"alignment" => {
+                    let alignment = style_parser::parse_alignment(xml, nested)?;
+                    if apply_alignment {
+                        style = style.with_alignment(alignment);
+                    }
+                }
+                b"protection" => {
+                    let protection = style_parser::parse_protection(xml, nested)?;
+                    if apply_protection {
+                        style = style.with_protection(protection);
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::End(ref end)) if end.local_name().as_ref() == b"xf" => break,
+            Ok(Event::Eof) => return Err(XlsxError::XmlEof("xf")),
+            Err(error) => return Err(XlsxError::Xml(error)),
+            _ => {}
+        }
+    }
+
+    Ok((style, cell_format))
+}
 
 /// An enum for Xlsx specific errors.
 #[derive(Debug)]
@@ -242,18 +589,29 @@ impl FromStr for CellErrorType {
 
 type Tables = Option<Vec<(String, String, Vec<String>, Dimensions)>>;
 
+struct WorkbookRelationships {
+    targets: BTreeMap<Vec<u8>, String>,
+    theme_path: Option<String>,
+}
+
 /// A struct representing xml zipped excel file
 /// Xlsx, Xlsm, Xlam
 pub struct Xlsx<RS> {
     zip: ZipArchive<RS>,
-    /// Shared strings
-    strings: Vec<String>,
+    /// Shared strings (can be plain strings or rich text)
+    strings: Vec<Data>,
     /// Sheets paths
     sheets: Vec<(String, String)>,
     /// Tables: Name, Sheet, Columns, Data dimensions
     tables: Tables,
     /// Cell (number) formats
     formats: Vec<CellFormat>,
+    /// Cell styles
+    pub styles: Vec<Style>,
+    /// Resolved workbook theme in SpreadsheetML slot order.
+    theme_colors: [crate::Color; 12],
+    /// Workbook-specific replacements for the 64 indexed-color slots.
+    indexed_colors: Box<[Option<crate::Color>; 64]>,
     /// 1904 datetime system
     is_1904: bool,
     /// Metadata
@@ -275,6 +633,112 @@ struct XlsxOptions {
 }
 
 impl<RS: Read + Seek> Xlsx<RS> {
+    fn read_theme(&mut self, theme_path: Option<&str>) -> Result<(), XlsxError> {
+        const CONVENTIONAL_THEME_PATH: &str = "xl/theme/theme1.xml";
+        let theme_path = theme_path
+            .filter(|path| zip_contains_path(&self.zip, path))
+            .unwrap_or(CONVENTIONAL_THEME_PATH);
+        let mut xml = match xml_reader(&mut self.zip, theme_path) {
+            None => return Ok(()),
+            Some(reader) => reader?,
+        };
+        let mut buf = Vec::with_capacity(1024);
+        let mut in_color_scheme = false;
+        let mut active_slot = None;
+
+        loop {
+            buf.clear();
+            match xml.read_event_into(&mut buf) {
+                Ok(Event::Start(ref element)) => {
+                    let name = element.local_name();
+                    if name.as_ref() == b"clrScheme" {
+                        in_color_scheme = true;
+                    } else if in_color_scheme {
+                        if let Some(slot) = theme_slot(name.as_ref()) {
+                            active_slot = Some(slot);
+                        } else if let Some(slot) = active_slot {
+                            let target_attribute = match name.as_ref() {
+                                b"srgbClr" => Some(b"val".as_slice()),
+                                b"sysClr" => Some(b"lastClr".as_slice()),
+                                _ => None,
+                            };
+                            if let Some(target_attribute) = target_attribute {
+                                for attribute in element.attributes() {
+                                    let attribute = attribute?;
+                                    if attribute.key.as_ref() == target_attribute {
+                                        self.theme_colors[slot] =
+                                            parse_theme_rgb(attribute.value.as_ref())?;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Event::End(ref element)) if element.local_name().as_ref() == b"clrScheme" => {
+                    break;
+                }
+                Ok(Event::End(ref element))
+                    if theme_slot(element.local_name().as_ref()).is_some() =>
+                {
+                    active_slot = None;
+                }
+                Ok(Event::Eof) => break,
+                Err(error) => return Err(XlsxError::Xml(error)),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn read_indexed_colors(&mut self) -> Result<(), XlsxError> {
+        let mut xml = match xml_reader(&mut self.zip, "xl/styles.xml") {
+            None => return Ok(()),
+            Some(reader) => reader?,
+        };
+        let mut buf = Vec::with_capacity(1024);
+        let mut in_indexed_colors = false;
+        let mut index = 0usize;
+
+        loop {
+            buf.clear();
+            match xml.read_event_into(&mut buf) {
+                Ok(Event::Start(ref element))
+                    if element.local_name().as_ref() == b"indexedColors" =>
+                {
+                    in_indexed_colors = true;
+                }
+                Ok(Event::Start(ref element))
+                    if in_indexed_colors && element.local_name().as_ref() == b"rgbColor" =>
+                {
+                    if index < self.indexed_colors.len() {
+                        let attributes = element.attributes().collect::<Result<Vec<_>, _>>()?;
+                        if let Some(color) = style_parser::parse_color(
+                            &attributes,
+                            &self.theme_colors,
+                            &self.indexed_colors,
+                        )? {
+                            self.indexed_colors[index] = Some(color);
+                        }
+                    }
+                    // Preserve sequence positions even for an omitted optional
+                    // rgb attribute, and bound storage without rejecting schema-
+                    // valid palettes that contain more entries than we expose.
+                    index = index.saturating_add(1);
+                }
+                Ok(Event::End(ref element))
+                    if element.local_name().as_ref() == b"indexedColors" =>
+                {
+                    break;
+                }
+                Ok(Event::Eof) => break,
+                Err(error) => return Err(XlsxError::Xml(error)),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn read_shared_strings(&mut self) -> Result<(), XlsxError> {
         let mut xml = match xml_reader(&mut self.zip, "xl/sharedStrings.xml") {
             None => return Ok(()),
@@ -285,8 +749,13 @@ impl<RS: Read + Seek> Xlsx<RS> {
             buf.clear();
             match xml.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) if e.local_name().as_ref() == b"si" => {
-                    if let Some(s) = read_string(&mut xml, e.name())? {
-                        self.strings.push(s);
+                    if let Some(data) = read_rich_string(
+                        &mut xml,
+                        e.name(),
+                        &self.theme_colors,
+                        &self.indexed_colors,
+                    )? {
+                        self.strings.push(data);
                     }
                 }
                 Ok(Event::End(e)) if e.local_name().as_ref() == b"sst" => break,
@@ -305,6 +774,11 @@ impl<RS: Read + Seek> Xlsx<RS> {
         };
 
         let mut number_formats = BTreeMap::new();
+        let mut fonts = Vec::new();
+        let mut fills = Vec::new();
+        let mut borders = Vec::new();
+        let mut cell_style_xfs = Vec::new();
+        let mut cell_style_formats = Vec::new();
 
         let mut buf = Vec::with_capacity(1024);
         let mut inner_buf = Vec::with_capacity(1024);
@@ -314,23 +788,31 @@ impl<RS: Read + Seek> Xlsx<RS> {
                 Ok(Event::Start(e)) if e.local_name().as_ref() == b"numFmts" => loop {
                     inner_buf.clear();
                     match xml.read_event_into(&mut inner_buf) {
-                        Ok(Event::Start(e)) if e.local_name().as_ref() == b"numFmt" => {
+                        Ok(Event::Start(e) | Event::Empty(e))
+                            if e.local_name().as_ref() == b"numFmt" =>
+                        {
                             let mut id = Vec::new();
-                            let mut format = String::new();
+                            let mut format = None;
                             for a in e.attributes() {
-                                match a? {
+                                let a = a?;
+                                match a {
                                     Attribute {
                                         key: QName(b"numFmtId"),
                                         value: v,
                                     } => id.extend_from_slice(&v),
                                     Attribute {
                                         key: QName(b"formatCode"),
-                                        value: v,
-                                    } => format = xml.decoder().decode(&v)?.into_owned(),
+                                        ..
+                                    } => {
+                                        let raw = a
+                                            .decode_and_unescape_value(xml.decoder())?
+                                            .into_owned();
+                                        format = Some(raw);
+                                    }
                                     _ => (),
                                 }
                             }
-                            if !format.is_empty() {
+                            if let Some(format) = format {
                                 number_formats.insert(id, format);
                             }
                         }
@@ -340,21 +822,239 @@ impl<RS: Read + Seek> Xlsx<RS> {
                         _ => (),
                     }
                 },
-                Ok(Event::Start(e)) if e.local_name().as_ref() == b"cellXfs" => loop {
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"fonts" => loop {
                     inner_buf.clear();
                     match xml.read_event_into(&mut inner_buf) {
-                        Ok(Event::Start(e)) if e.local_name().as_ref() == b"xf" => {
-                            self.formats.push(
-                                e.attributes()
-                                    .filter_map(|a| a.ok())
-                                    .find(|a| a.key == QName(b"numFmtId"))
-                                    .map_or(CellFormat::Other, |a| {
-                                        match number_formats.get(&*a.value) {
-                                            Some(fmt) => detect_custom_number_format(fmt),
-                                            None => builtin_format_by_id(&a.value),
+                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"font" => {
+                            let font = style_parser::parse_font(
+                                &mut xml,
+                                e,
+                                &self.theme_colors,
+                                &self.indexed_colors,
+                            )?;
+                            fonts.push(font);
+                        }
+                        Ok(Event::End(ref e)) if e.local_name().as_ref() == b"fonts" => break,
+                        Ok(Event::Eof) => return Err(XlsxError::XmlEof("fonts")),
+                        Err(e) => return Err(XlsxError::Xml(e)),
+                        _ => (),
+                    }
+                },
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"fills" => loop {
+                    inner_buf.clear();
+                    match xml.read_event_into(&mut inner_buf) {
+                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"fill" => {
+                            let fill = style_parser::parse_fill(
+                                &mut xml,
+                                e,
+                                &self.theme_colors,
+                                &self.indexed_colors,
+                            )?;
+                            fills.push(fill);
+                        }
+                        Ok(Event::End(ref e)) if e.local_name().as_ref() == b"fills" => break,
+                        Ok(Event::Eof) => return Err(XlsxError::XmlEof("fills")),
+                        Err(e) => return Err(XlsxError::Xml(e)),
+                        _ => (),
+                    }
+                },
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"borders" => loop {
+                    inner_buf.clear();
+                    match xml.read_event_into(&mut inner_buf) {
+                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"border" => {
+                            let border = style_parser::parse_border(
+                                &mut xml,
+                                e,
+                                &self.theme_colors,
+                                &self.indexed_colors,
+                            )?;
+                            borders.push(border);
+                        }
+                        Ok(Event::End(ref e)) if e.local_name().as_ref() == b"borders" => break,
+                        Ok(Event::Eof) => return Err(XlsxError::XmlEof("borders")),
+                        Err(e) => return Err(XlsxError::Xml(e)),
+                        _ => (),
+                    }
+                },
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"cellStyleXfs" => loop {
+                    inner_buf.clear();
+                    match xml.read_event_into(&mut inner_buf) {
+                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"xf" => {
+                            let (style, format) = parse_xf_record(
+                                &mut xml,
+                                e,
+                                &number_formats,
+                                &fonts,
+                                &fills,
+                                &borders,
+                                (&[], &[]),
+                            )?;
+                            cell_style_xfs.push(style);
+                            cell_style_formats.push(format);
+                        }
+                        Ok(Event::End(ref e)) if e.local_name().as_ref() == b"cellStyleXfs" => {
+                            break
+                        }
+                        Ok(Event::Eof) => return Err(XlsxError::XmlEof("cellStyleXfs")),
+                        Err(e) => return Err(XlsxError::Xml(e)),
+                        _ => (),
+                    }
+                },
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"cellXfs" => loop {
+                    inner_buf.clear();
+                    match xml.read_event_into(&mut inner_buf) {
+                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"xf" => {
+                            // Start from the referenced named-style XF. Explicitly
+                            // disabled cell-XF components retain this base value.
+                            let base_style_id = get_attribute(e.attributes(), QName(b"xfId"))?
+                                .and_then(|value| atoi_simd::parse::<usize>(value).ok());
+                            let mut style = base_style_id
+                                .and_then(|style_id| cell_style_xfs.get(style_id))
+                                .cloned()
+                                .unwrap_or_default();
+                            let mut cell_format = base_style_id
+                                .and_then(|style_id| cell_style_formats.get(style_id))
+                                .copied()
+                                .unwrap_or(CellFormat::Other);
+                            let mut num_fmt_id_bytes: Option<Vec<u8>> = None;
+                            let mut font_id = None;
+                            let mut fill_id = None;
+                            let mut border_id = None;
+                            // Preserve the historical behavior when an apply flag
+                            // is omitted, but honor an explicit false value.
+                            let mut apply_font = true;
+                            let mut apply_fill = true;
+                            let mut apply_border = true;
+                            let mut apply_number_format = true;
+                            let mut apply_alignment = true;
+                            let mut apply_protection = true;
+
+                            // Parse attributes to get references to fonts, fills, borders
+                            for a in e.attributes() {
+                                let a = a?;
+                                match a.key.as_ref() {
+                                    b"fontId" => {
+                                        font_id =
+                                            xml.decoder().decode(&a.value)?.parse::<usize>().ok();
+                                    }
+                                    b"fillId" => {
+                                        fill_id =
+                                            xml.decoder().decode(&a.value)?.parse::<usize>().ok();
+                                    }
+                                    b"borderId" => {
+                                        border_id =
+                                            xml.decoder().decode(&a.value)?.parse::<usize>().ok();
+                                    }
+                                    b"numFmtId" => {
+                                        // Store for both Style and CellFormat after
+                                        // applyNumberFormat has been considered.
+                                        num_fmt_id_bytes = Some(a.value.to_vec());
+                                    }
+                                    b"applyFont" => {
+                                        apply_font = style_parser::parse_ooxml_bool(&a.value)?;
+                                    }
+                                    b"applyFill" => {
+                                        apply_fill = style_parser::parse_ooxml_bool(&a.value)?;
+                                    }
+                                    b"applyBorder" => {
+                                        apply_border = style_parser::parse_ooxml_bool(&a.value)?;
+                                    }
+                                    b"applyNumberFormat" => {
+                                        apply_number_format =
+                                            style_parser::parse_ooxml_bool(&a.value)?;
+                                    }
+                                    b"applyAlignment" => {
+                                        apply_alignment = style_parser::parse_ooxml_bool(&a.value)?;
+                                    }
+                                    b"applyProtection" => {
+                                        apply_protection =
+                                            style_parser::parse_ooxml_bool(&a.value)?;
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            if apply_font {
+                                if let Some(font) = font_id.and_then(|id| fonts.get(id)) {
+                                    style = style.with_font(font.clone());
+                                }
+                            }
+                            if apply_fill {
+                                if let Some(fill) = fill_id.and_then(|id| fills.get(id)) {
+                                    style = style.with_fill(fill.clone());
+                                }
+                            }
+                            if apply_border {
+                                if let Some(border) = border_id.and_then(|id| borders.get(id)) {
+                                    style = style.with_borders(border.clone());
+                                }
+                            }
+
+                            let num_fmt_id_bytes =
+                                apply_number_format.then_some(num_fmt_id_bytes).flatten();
+                            if let Some(id_bytes) = num_fmt_id_bytes.as_ref() {
+                                cell_format = match number_formats.get(id_bytes) {
+                                    Some(raw) => detect_custom_number_format(raw),
+                                    None => builtin_format_by_id(id_bytes),
+                                };
+                                if let Ok(num_fmt_id) =
+                                    xml.decoder().decode(id_bytes)?.parse::<u32>()
+                                {
+                                    let format_code = match number_formats.get(id_bytes) {
+                                        Some(raw) => raw.clone(),
+                                        None => builtin_number_format_code(num_fmt_id)
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                    };
+
+                                    use crate::style::NumberFormat;
+                                    let number_format =
+                                        NumberFormat::new(format_code).with_id(num_fmt_id);
+                                    style = style.with_number_format(number_format);
+                                }
+                            }
+
+                            // Also parse any nested elements like alignment and protection
+                            let mut nested_buf = Vec::with_capacity(512);
+                            loop {
+                                nested_buf.clear();
+                                match xml.read_event_into(&mut nested_buf) {
+                                    Ok(Event::Start(ref nested_e)) => match nested_e
+                                        .local_name()
+                                        .as_ref()
+                                    {
+                                        b"alignment" => {
+                                            let alignment =
+                                                style_parser::parse_alignment(&mut xml, nested_e)?;
+                                            if apply_alignment {
+                                                style = style.with_alignment(alignment);
+                                            }
                                         }
-                                    }),
-                            );
+                                        b"protection" => {
+                                            let protection =
+                                                style_parser::parse_protection(&mut xml, nested_e)?;
+                                            if apply_protection {
+                                                style = style.with_protection(protection);
+                                            }
+                                        }
+                                        _ => {
+                                            // Skip unknown nested elements
+                                            xml.read_to_end_into(nested_e.name(), &mut Vec::new())?;
+                                        }
+                                    },
+                                    Ok(Event::End(ref end_e))
+                                        if end_e.local_name().as_ref() == b"xf" =>
+                                    {
+                                        break
+                                    }
+                                    Ok(Event::Eof) => return Err(XlsxError::XmlEof("xf")),
+                                    Err(e) => return Err(XlsxError::Xml(e)),
+                                    _ => {}
+                                }
+                            }
+
+                            self.styles.push(style);
+                            self.formats.push(cell_format);
                         }
                         Ok(Event::End(e)) if e.local_name().as_ref() == b"cellXfs" => break,
                         Ok(Event::Eof) => return Err(XlsxError::XmlEof("cellXfs")),
@@ -371,10 +1071,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
         Ok(())
     }
 
-    fn read_workbook(
-        &mut self,
-        relationships: &BTreeMap<Vec<u8>, String>,
-    ) -> Result<(), XlsxError> {
+    fn read_workbook(&mut self, relationships: &WorkbookRelationships) -> Result<(), XlsxError> {
         let mut xml = match xml_reader(&mut self.zip, "xl/workbook.xml") {
             None => return Ok(()),
             Some(x) => x?,
@@ -419,18 +1116,11 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                 key: QName(b"r:id" | b"relationships:id"),
                                 value: v,
                             } => {
-                                let r = &relationships
+                                let target = relationships
+                                    .targets
                                     .get(&*v)
-                                    .ok_or(XlsxError::RelationshipNotFound)?[..];
-                                // target may have prepended "/xl/" or "xl/" path;
-                                // strip if present
-                                path = if r.starts_with("/xl/") {
-                                    r[1..].to_string()
-                                } else if r.starts_with("xl/") {
-                                    r.to_string()
-                                } else {
-                                    format!("xl/{r}")
-                                };
+                                    .ok_or(XlsxError::RelationshipNotFound)?;
+                                path = resolve_workbook_relationship_target(target)?;
                             }
                             _ => (),
                         }
@@ -494,7 +1184,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
         Ok(())
     }
 
-    fn read_relationships(&mut self) -> Result<BTreeMap<Vec<u8>, String>, XlsxError> {
+    fn read_relationships(&mut self) -> Result<WorkbookRelationships, XlsxError> {
         let mut xml = match xml_reader(&mut self.zip, "xl/_rels/workbook.xml.rels") {
             None => {
                 return Err(XlsxError::FileNotFound(
@@ -503,7 +1193,8 @@ impl<RS: Read + Seek> Xlsx<RS> {
             }
             Some(x) => x?,
         };
-        let mut relationships = BTreeMap::new();
+        let mut targets = BTreeMap::new();
+        let mut theme_target = None;
         let mut buf = Vec::with_capacity(64);
         loop {
             buf.clear();
@@ -511,20 +1202,34 @@ impl<RS: Read + Seek> Xlsx<RS> {
                 Ok(Event::Start(e)) if e.local_name().as_ref() == b"Relationship" => {
                     let mut id = Vec::new();
                     let mut target = String::new();
-                    for a in e.attributes() {
-                        match a? {
-                            Attribute {
-                                key: QName(b"Id"),
-                                value: v,
-                            } => id.extend_from_slice(&v),
-                            Attribute {
-                                key: QName(b"Target"),
-                                value: v,
-                            } => target = xml.decoder().decode(&v)?.into_owned(),
-                            _ => (),
+                    let mut relationship_type = String::new();
+                    let mut external = false;
+                    for attribute in e.attributes() {
+                        let attribute = attribute?;
+                        match attribute.key.as_ref() {
+                            b"Id" => id.extend_from_slice(&attribute.value),
+                            b"Target" => {
+                                target = attribute
+                                    .decode_and_unescape_value(xml.decoder())?
+                                    .into_owned();
+                            }
+                            b"Type" => {
+                                relationship_type = attribute
+                                    .decode_and_unescape_value(xml.decoder())?
+                                    .into_owned();
+                            }
+                            b"TargetMode" => {
+                                external = attribute
+                                    .decode_and_unescape_value(xml.decoder())?
+                                    .eq_ignore_ascii_case("external");
+                            }
+                            _ => {}
                         }
                     }
-                    relationships.insert(id, target);
+                    if !external && relationship_type.ends_with("/theme") {
+                        theme_target = Some(target.clone());
+                    }
+                    targets.insert(id, target);
                 }
                 Ok(Event::End(e)) if e.local_name().as_ref() == b"Relationships" => break,
                 Ok(Event::Eof) => return Err(XlsxError::XmlEof("Relationships")),
@@ -532,7 +1237,28 @@ impl<RS: Read + Seek> Xlsx<RS> {
                 _ => (),
             }
         }
-        Ok(relationships)
+        drop(xml);
+
+        // Targets are relative to xl/workbook.xml. A few producers historically
+        // emitted rootish `xl/...` paths without the required leading slash;
+        // prefer the standards-relative part and use that legacy spelling only
+        // when it is the part that actually exists in the archive.
+        for target in targets.values_mut() {
+            if let Some(rootish) = legacy_rootish_workbook_target(&self.zip, target) {
+                *target = format!("/{rootish}");
+            }
+        }
+        let theme_path = theme_target
+            .map(|target| {
+                legacy_rootish_workbook_target(&self.zip, &target)
+                    .map_or_else(|| resolve_workbook_relationship_target(&target), Ok)
+            })
+            .transpose()?;
+
+        Ok(WorkbookRelationships {
+            targets,
+            theme_path,
+        })
     }
 
     // sheets must be added before this is called!!
@@ -1498,6 +2224,391 @@ impl<RS: Read + Seek> Xlsx<RS> {
 
         self.worksheet_merge_cells(&name)
     }
+
+    /// Get the cells reader for a worksheet.
+    ///
+    /// This function returns a [`XlsxCellReader`] for the specified worksheet.
+    /// The reader can be used to iterate over the cells in the worksheet.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: The name of the worksheet to get the cells reader for.
+    ///
+    /// # Errors
+    ///
+    /// - [`XlsxError::WorksheetNotFound`].
+    ///
+    /// # Examples
+    ///
+    /// An example of getting the cells reader for a worksheet.
+    ///
+    /// ```
+    /// use calamine::{open_workbook, Error, Xlsx};
+    ///
+    /// fn main() -> Result<(), Error> {
+    ///     let path = "tests/merged_range.xlsx";
+    ///
+    ///     // Open the workbook.
+    ///     let mut workbook: Xlsx<_> = open_workbook(path)?;
+    ///
+    ///     // Get the cells reader for the first worksheet.
+    ///     let mut reader = workbook.worksheet_cells_reader("Sheet1")?;
+    ///
+    ///     // Iterate over the cells in the worksheet.
+    ///     while let Some(cell) = reader.next_cell()? {
+    ///         println!("{:?}", cell);
+    ///     }
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// Output:
+    ///
+    /// ```text
+    /// Cell {
+    ///     row: 0,
+    ///     col: 0,
+    ///     val: "Hello, world!".to_string(),
+    ///     err: None,
+    ///     typ: DataType::String,
+    /// }
+    /// ```
+    pub fn worksheet_cells_reader<'a>(
+        &'a mut self,
+        name: &str,
+    ) -> Result<XlsxCellReader<'a, RS>, XlsxError> {
+        let (_, path) = self
+            .sheets
+            .iter()
+            .find(|&(n, _)| n == name)
+            .ok_or_else(|| XlsxError::WorksheetNotFound(name.into()))?;
+        let xml = xml_reader(&mut self.zip, path)
+            .ok_or_else(|| XlsxError::WorksheetNotFound(name.into()))??;
+        let is_1904 = self.is_1904;
+        let strings = &self.strings;
+        let formats = &self.formats;
+        let styles = &self.styles;
+        let theme_colors = &self.theme_colors;
+        let indexed_colors = &self.indexed_colors;
+        XlsxCellReader::new_with_theme(
+            xml,
+            strings,
+            formats,
+            styles,
+            (theme_colors, indexed_colors),
+            is_1904,
+        )
+    }
+
+    /// Get the styles for a worksheet.
+    ///
+    /// Get worksheet styles as an RLE-compressed [`StyleRange`].
+    ///
+    /// This function returns styles for all cells with explicit formatting,
+    /// stored in run-length encoded format for memory efficiency.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: The name of the worksheet to get the styles for.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let styles = xlsx.worksheet_style("Sheet1")?;
+    /// println!("Unique styles: {}", styles.unique_style_count());
+    /// println!("Compression ratio: {:.1}x", styles.compression_ratio());
+    /// for (row, col, style) in styles.cells() {
+    ///     // process style
+    /// }
+    /// ```
+    pub fn worksheet_style(&mut self, name: &str) -> Result<StyleRange, XlsxError> {
+        let mut cell_reader = match self.worksheet_cells_reader(name) {
+            Ok(reader) => reader,
+            Err(XlsxError::NotAWorksheet(typ)) => {
+                warn!("'{typ}' not a worksheet");
+                return Ok(StyleRange::empty());
+            }
+            Err(e) => return Err(e),
+        };
+
+        let len = cell_reader.dimensions().len();
+        let mut cells = Vec::new();
+        if len < 100_000 {
+            cells.reserve(len as usize);
+        }
+
+        // Use zero-copy path: collect (row, col, style_id) without cloning styles
+        while let Some((row, col, style_id)) = cell_reader.next_style_id()? {
+            cells.push((row, col, style_id));
+        }
+
+        // Retain only styles referenced by this sheet. Each used workbook style
+        // is cloned once, then all cells refer to its compact sheet-local ID.
+        let palette = compact_worksheet_style_palette(&mut cells, cell_reader.styles());
+
+        Ok(StyleRange::from_style_ids(cells, palette))
+    }
+
+    /// Get the layout for a worksheet.
+    ///
+    /// This function returns a [`WorksheetLayout`] for the specified worksheet.
+    /// The layout contains the column widths and row heights for the cells in the worksheet.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: The name of the worksheet to get the layout for.
+    ///
+    pub fn worksheet_layout(&mut self, name: &str) -> Result<WorksheetLayout, XlsxError> {
+        let (_, path) = self
+            .sheets
+            .iter()
+            .find(|&(n, _)| n == name)
+            .ok_or_else(|| XlsxError::WorksheetNotFound(name.into()))?;
+
+        let mut xml = xml_reader(&mut self.zip, path)
+            .ok_or_else(|| XlsxError::WorksheetNotFound(name.into()))??;
+
+        let mut layout = WorksheetLayout::new();
+        let mut buf = Vec::with_capacity(1024);
+
+        loop {
+            buf.clear();
+            match xml.read_event_into(&mut buf) {
+                Ok(Event::Start(ref e) | Event::Empty(ref e))
+                    if e.local_name().as_ref() == b"sheetFormatPr" =>
+                {
+                    // Parse default column width and row height
+                    for attr in e.attributes() {
+                        let attr = attr.map_err(XlsxError::XmlAttr)?;
+                        match attr.key.as_ref() {
+                            b"defaultColWidth" => {
+                                if let Ok(width_str) = xml.decoder().decode(&attr.value) {
+                                    if let Ok(width) = width_str.parse::<f64>() {
+                                        layout = layout.with_default_column_width(width);
+                                    }
+                                }
+                            }
+                            b"defaultRowHeight" => {
+                                if let Ok(height_str) = xml.decoder().decode(&attr.value) {
+                                    if let Ok(height) = height_str.parse::<f64>() {
+                                        layout = layout.with_default_row_height(height);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"cols" => {
+                    // Parse column definitions
+                    loop {
+                        buf.clear();
+                        match xml.read_event_into(&mut buf) {
+                            Ok(Event::Start(ref col_e) | Event::Empty(ref col_e))
+                                if col_e.local_name().as_ref() == b"col" =>
+                            {
+                                let mut min_column = None;
+                                let mut max_column = None;
+                                let mut width = None;
+                                let mut custom_width = false;
+                                let mut hidden = false;
+                                let mut best_fit = false;
+
+                                for attr in col_e.attributes() {
+                                    let attr = attr.map_err(XlsxError::XmlAttr)?;
+                                    match attr.key.as_ref() {
+                                        b"min" => {
+                                            if let Ok(value) = xml.decoder().decode(&attr.value) {
+                                                min_column = value.parse::<u32>().ok();
+                                            }
+                                        }
+                                        b"max" => {
+                                            if let Ok(value) = xml.decoder().decode(&attr.value) {
+                                                max_column = value.parse::<u32>().ok();
+                                            }
+                                        }
+                                        b"width" => {
+                                            // Preserve the historical fallback for a malformed
+                                            // width attribute while keeping an absent attribute
+                                            // distinct from an explicit width of zero.
+                                            width = Some(0.0);
+                                            if let Ok(width_str) = xml.decoder().decode(&attr.value)
+                                            {
+                                                if let Ok(w) = width_str.parse::<f64>() {
+                                                    width = Some(w);
+                                                }
+                                            }
+                                        }
+                                        b"customWidth" => {
+                                            custom_width =
+                                                style_parser::parse_ooxml_bool(&attr.value)?;
+                                        }
+                                        b"hidden" => {
+                                            hidden = style_parser::parse_ooxml_bool(&attr.value)?;
+                                        }
+                                        b"bestFit" => {
+                                            best_fit = style_parser::parse_ooxml_bool(&attr.value)?;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+
+                                if let Some(min_column) = min_column {
+                                    let width = width.unwrap_or_else(|| {
+                                        layout.default_column_width.unwrap_or(DEFAULT_COLUMN_WIDTH)
+                                    });
+                                    for column in worksheet_column_span(min_column, max_column)? {
+                                        let column_width = ColumnWidth::new(column, width)
+                                            .with_custom_width(custom_width)
+                                            .with_hidden(hidden)
+                                            .with_best_fit(best_fit);
+                                        layout = layout.add_column_width(column_width);
+                                    }
+                                }
+                            }
+                            Ok(Event::End(ref end_e)) if end_e.local_name().as_ref() == b"cols" => {
+                                break;
+                            }
+                            Ok(Event::Eof) => return Err(XlsxError::XmlEof("cols")),
+                            Err(e) => return Err(XlsxError::Xml(e)),
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"sheetData" => {
+                    // Parse row definitions
+                    let mut next_implicit_row = 0u32;
+                    loop {
+                        buf.clear();
+                        match xml.read_event_into(&mut buf) {
+                            Ok(Event::Start(ref row_e))
+                                if row_e.local_name().as_ref() == b"row" =>
+                            {
+                                let mut row_num = next_implicit_row;
+                                let mut height = None;
+                                let mut has_explicit_height = false;
+                                let mut custom_height = false;
+                                let mut hidden = false;
+                                let mut thick_top = false;
+                                let mut thick_bottom = false;
+
+                                for attr in row_e.attributes() {
+                                    let attr = attr.map_err(XlsxError::XmlAttr)?;
+                                    match attr.key.as_ref() {
+                                        b"r" => {
+                                            let row_str = xml.decoder().decode(&attr.value)?;
+                                            let one_based_row = row_str.parse::<u32>()?;
+                                            row_num = one_based_row.checked_sub(1).ok_or(
+                                                XlsxError::Unexpected(
+                                                    "worksheet row index must be one-based",
+                                                ),
+                                            )?;
+                                        }
+                                        b"ht" => {
+                                            // Preserve the historical fallback for a malformed
+                                            // height attribute while keeping an absent attribute
+                                            // distinct from an explicit height of zero.
+                                            height = Some(0.0);
+                                            if let Ok(height_str) =
+                                                xml.decoder().decode(&attr.value)
+                                            {
+                                                if let Ok(h) = height_str.parse::<f64>() {
+                                                    // Match the previous acceptance of positive
+                                                    // values while also retaining a valid zero.
+                                                    has_explicit_height = h >= 0.0;
+                                                    height = Some(h);
+                                                }
+                                            }
+                                        }
+                                        b"customHeight" => {
+                                            custom_height =
+                                                style_parser::parse_ooxml_bool(&attr.value)?;
+                                        }
+                                        b"hidden" => {
+                                            hidden = style_parser::parse_ooxml_bool(&attr.value)?;
+                                        }
+                                        b"thickTop" => {
+                                            thick_top =
+                                                style_parser::parse_ooxml_bool(&attr.value)?;
+                                        }
+                                        b"thickBot" => {
+                                            thick_bottom =
+                                                style_parser::parse_ooxml_bool(&attr.value)?;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+
+                                if row_num >= MAX_ROWS {
+                                    return Err(XlsxError::RowNumberOverflow);
+                                }
+                                next_implicit_row = row_num.saturating_add(1);
+
+                                // Only add row height if it's custom or has special properties
+                                if custom_height
+                                    || hidden
+                                    || thick_top
+                                    || thick_bottom
+                                    || has_explicit_height
+                                {
+                                    let height = height.unwrap_or_else(|| {
+                                        layout.default_row_height.unwrap_or(DEFAULT_ROW_HEIGHT)
+                                    });
+                                    let row_height = RowHeight::new(row_num, height)
+                                        .with_custom_height(custom_height)
+                                        .with_hidden(hidden)
+                                        .with_thick_top(thick_top)
+                                        .with_thick_bottom(thick_bottom);
+                                    layout = layout.add_row_height(row_height);
+                                }
+
+                                // Skip to the end of this row element
+                                xml.read_to_end_into(row_e.name(), &mut Vec::new())?;
+                            }
+                            Ok(Event::End(ref end_e))
+                                if end_e.local_name().as_ref() == b"sheetData" =>
+                            {
+                                break;
+                            }
+                            Ok(Event::Eof) => return Err(XlsxError::XmlEof("sheetData")),
+                            Err(e) => return Err(XlsxError::Xml(e)),
+                            _ => {}
+                        }
+                    }
+                    break; // We're done after processing sheetData
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(XlsxError::Xml(e)),
+                _ => {}
+            }
+        }
+
+        Ok(layout)
+    }
+
+    /// Get all worksheets in the workbook.
+    ///
+    /// This function returns a vector of tuples, where each tuple contains the name of a worksheet and the range of cells in the worksheet.
+    ///
+    /// # Returns
+    ///
+    /// A vector of tuples, where each tuple contains the name of a worksheet and the range of cells in the worksheet.
+    ///
+    pub fn worksheets(&mut self) -> Vec<(String, Range<Data>)> {
+        let names = self
+            .sheets
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect::<Vec<_>>();
+        names
+            .into_iter()
+            .filter_map(|n| {
+                let rge = self.worksheet_range(&n).ok()?;
+                Some((n, rge))
+            })
+            .collect()
+    }
 }
 
 struct TableMetadata {
@@ -1525,26 +2636,6 @@ impl InnerTableMetadata {
     }
 }
 
-impl<RS: Read + Seek> Xlsx<RS> {
-    /// Get a reader over all used cells in the given worksheet cell reader
-    pub fn worksheet_cells_reader<'a>(
-        &'a mut self,
-        name: &str,
-    ) -> Result<XlsxCellReader<'a, RS>, XlsxError> {
-        let (_, path) = self
-            .sheets
-            .iter()
-            .find(|&(n, _)| n == name)
-            .ok_or_else(|| XlsxError::WorksheetNotFound(name.into()))?;
-        let xml = xml_reader(&mut self.zip, path)
-            .ok_or_else(|| XlsxError::WorksheetNotFound(name.into()))??;
-        let is_1904 = self.is_1904;
-        let strings = &self.strings;
-        let formats = &self.formats;
-        XlsxCellReader::new(xml, strings, formats, is_1904)
-    }
-}
-
 impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
     type Error = XlsxError;
 
@@ -1555,6 +2646,9 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
             zip: ZipArchive::new(reader)?,
             strings: Vec::new(),
             formats: Vec::new(),
+            styles: Vec::new(),
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
             is_1904: false,
             sheets: Vec::new(),
             tables: None,
@@ -1564,9 +2658,11 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
             merged_regions: None,
             options: XlsxOptions::default(),
         };
+        let relationships = xlsx.read_relationships()?;
+        xlsx.read_theme(relationships.theme_path.as_deref())?;
+        xlsx.read_indexed_colors()?;
         xlsx.read_shared_strings()?;
         xlsx.read_styles()?;
-        let relationships = xlsx.read_relationships()?;
         xlsx.read_workbook(&relationships)?;
         #[cfg(feature = "picture")]
         xlsx.read_pictures()?;
@@ -1616,12 +2712,20 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
         if len < 100_000 {
             cells.reserve(len as usize);
         }
-        while let Some(cell) = cell_reader.next_formula()? {
+        while let Some(cell) = cell_reader.next_formula_value_only()? {
             if !cell.val.is_empty() {
                 cells.push(cell);
             }
         }
         Ok(Range::from_sparse(cells))
+    }
+
+    fn worksheet_style(&mut self, name: &str) -> Result<StyleRange, XlsxError> {
+        Xlsx::worksheet_style(self, name)
+    }
+
+    fn worksheet_layout(&mut self, name: &str) -> Result<WorksheetLayout, XlsxError> {
+        Xlsx::worksheet_layout(self, name)
     }
 
     fn worksheets(&mut self) -> Vec<(String, Range<Data>)> {
@@ -1666,7 +2770,7 @@ impl<RS: Read + Seek> ReaderRef<RS> for Xlsx<RS> {
             HeaderRow::FirstNonEmptyRow => {
                 // the header row is the row of the first non-empty cell
                 loop {
-                    match cell_reader.next_cell() {
+                    match cell_reader.next_cell_value_only() {
                         Ok(Some(Cell {
                             val: DataRef::Empty,
                             ..
@@ -1680,7 +2784,7 @@ impl<RS: Read + Seek> ReaderRef<RS> for Xlsx<RS> {
             HeaderRow::Row(header_row_idx) => {
                 // If `header_row` is a row index, we only add non-empty cells after this index.
                 loop {
-                    match cell_reader.next_cell() {
+                    match cell_reader.next_cell_value_only() {
                         Ok(Some(Cell {
                             val: DataRef::Empty,
                             ..
@@ -1706,6 +2810,7 @@ impl<RS: Read + Seek> ReaderRef<RS> for Xlsx<RS> {
                                 cells.first().expect("cells should not be empty").pos.1,
                             ),
                             val: DataRef::Empty,
+                            style: None,
                         },
                     );
                 }
@@ -1851,43 +2956,248 @@ fn get_row_and_optional_column(range: &[u8]) -> Result<(u32, Option<u32>), XlsxE
     Ok((row, col.checked_sub(1)))
 }
 
-/// attempts to read either a simple or richtext string
-pub(crate) fn read_string<RS>(
+/// Result of parsing run properties - includes both the font and whether there's "rich" formatting
+struct RunPropertiesResult {
+    font: Font,
+    /// Whether the parsed font contains any property that makes this run
+    /// distinct from inherited plain text
+    has_rich_formatting: bool,
+}
+
+/// Parse run properties (rPr) to extract font formatting for rich text
+fn parse_run_properties<RS>(
     xml: &mut XlReader<'_, RS>,
     closing: QName,
-) -> Result<Option<String>, XlsxError>
+    theme_colors: &[crate::Color; 12],
+    indexed_colors: &[Option<crate::Color>; 64],
+) -> Result<Option<RunPropertiesResult>, XlsxError>
+where
+    RS: Read + Seek,
+{
+    let mut font = Font::new();
+    let mut has_any_props = false;
+    let mut has_rich_formatting = false;
+    let mut buf = Vec::with_capacity(256);
+
+    loop {
+        buf.clear();
+        match xml.read_event_into(&mut buf) {
+            Ok(Event::Start(e) | Event::Empty(e)) => {
+                match e.local_name().as_ref() {
+                    b"b" => {
+                        // The element itself is significant even when it
+                        // explicitly disables inherited bold formatting.
+                        let mut bold = true;
+                        for attribute in e.attributes() {
+                            let attribute = attribute?;
+                            if attribute.key.as_ref() == b"val" {
+                                bold = style_parser::parse_ooxml_bool(&attribute.value)?;
+                                break;
+                            }
+                        }
+                        font = font.with_weight(if bold {
+                            FontWeight::Bold
+                        } else {
+                            FontWeight::Normal
+                        });
+                        has_any_props = true;
+                        has_rich_formatting = true;
+                    }
+                    b"i" => {
+                        let mut italic = true;
+                        for attribute in e.attributes() {
+                            let attribute = attribute?;
+                            if attribute.key.as_ref() == b"val" {
+                                italic = style_parser::parse_ooxml_bool(&attribute.value)?;
+                                break;
+                            }
+                        }
+                        font = font.with_style(if italic {
+                            FontStyle::Italic
+                        } else {
+                            FontStyle::Normal
+                        });
+                        has_any_props = true;
+                        has_rich_formatting = true;
+                    }
+                    b"u" => {
+                        // Underline
+                        let mut underline = UnderlineStyle::Single;
+                        for attribute in e.attributes() {
+                            let attribute = attribute?;
+                            if attribute.key.as_ref() == b"val" {
+                                let val = String::from_utf8_lossy(&attribute.value);
+                                underline = match val.as_ref() {
+                                    "double" => UnderlineStyle::Double,
+                                    "singleAccounting" => UnderlineStyle::SingleAccounting,
+                                    "doubleAccounting" => UnderlineStyle::DoubleAccounting,
+                                    "none" => UnderlineStyle::None,
+                                    _ => UnderlineStyle::Single,
+                                };
+                                break;
+                            }
+                        }
+                        font = font.with_underline(underline);
+                        has_any_props = true;
+                        has_rich_formatting = true;
+                    }
+                    b"strike" => {
+                        let mut strikethrough = true;
+                        for attribute in e.attributes() {
+                            let attribute = attribute?;
+                            if attribute.key.as_ref() == b"val" {
+                                strikethrough = style_parser::parse_ooxml_bool(&attribute.value)?;
+                                break;
+                            }
+                        }
+                        font = font.with_strikethrough(strikethrough);
+                        has_any_props = true;
+                        has_rich_formatting = true;
+                    }
+                    b"sz" => {
+                        // Font size is run formatting even when no emphasis flag is set
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"val" {
+                                if let Ok(size) =
+                                    String::from_utf8_lossy(&attr.value).parse::<f64>()
+                                {
+                                    font = font.with_size(size);
+                                    has_any_props = true;
+                                    has_rich_formatting = true;
+                                }
+                            }
+                        }
+                    }
+                    b"color" => {
+                        // Font color - counts as rich formatting
+                        if let Some(color) = parse_run_color(&e, theme_colors, indexed_colors)? {
+                            font = font.with_color(color);
+                            has_any_props = true;
+                            has_rich_formatting = true;
+                        }
+                    }
+                    b"rFont" => {
+                        // Font name is run formatting even when no emphasis flag is set
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"val" {
+                                font = font
+                                    .with_name(String::from_utf8_lossy(&attr.value).to_string());
+                                has_any_props = true;
+                                has_rich_formatting = true;
+                            }
+                        }
+                    }
+                    b"family" => {
+                        // Font family is run formatting even when no emphasis flag is set
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"val" {
+                                font = font
+                                    .with_family(String::from_utf8_lossy(&attr.value).to_string());
+                                has_any_props = true;
+                                has_rich_formatting = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(e)) if e.name() == closing => break,
+            Ok(Event::Eof) => return Err(XlsxError::XmlEof("rPr")),
+            Err(e) => return Err(XlsxError::Xml(e)),
+            _ => {}
+        }
+    }
+
+    Ok(if has_any_props {
+        Some(RunPropertiesResult {
+            font,
+            has_rich_formatting,
+        })
+    } else {
+        None
+    })
+}
+
+/// Parse color from a run properties color element
+fn parse_run_color(
+    e: &quick_xml::events::BytesStart<'_>,
+    theme_colors: &[crate::Color; 12],
+    indexed_colors: &[Option<crate::Color>; 64],
+) -> Result<Option<crate::Color>, XlsxError> {
+    let attributes = e.attributes().collect::<Result<Vec<_>, _>>()?;
+    style_parser::parse_color(&attributes, theme_colors, indexed_colors)
+}
+
+/// Read a string from shared strings, preserving rich text formatting if present.
+/// Returns Data::String for plain text or Data::RichText for formatted text.
+fn read_rich_string<RS>(
+    xml: &mut XlReader<'_, RS>,
+    closing: QName,
+    theme_colors: &[crate::Color; 12],
+    indexed_colors: &[Option<crate::Color>; 64],
+) -> Result<Option<Data>, XlsxError>
 where
     RS: Read + Seek,
 {
     let mut buf = Vec::with_capacity(1024);
     let mut val_buf = Vec::with_capacity(1024);
-    let mut rich_buffer: Option<String> = None;
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut current_props: Option<RunPropertiesResult> = None;
+    let mut is_rich_text = false;
     let mut is_phonetic_text = false;
+    let mut plain_text: Option<String> = None;
+    let mut has_any_rich_formatting = false;
+
     loop {
         buf.clear();
         match xml.read_event_into(&mut buf) {
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"r" => {
-                if rich_buffer.is_none() {
-                    // use a buffer since richtext has multiples <r> and <t> for the same cell
-                    rich_buffer = Some(String::new());
+                // Start of a rich text run
+                is_rich_text = true;
+                current_props = None;
+            }
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"r" => {
+                // End of a rich text run
+                current_props = None;
+            }
+            Ok(Event::Start(e)) if e.local_name().as_ref() == b"rPr" => {
+                // Run properties (formatting)
+                current_props = parse_run_properties(xml, e.name(), theme_colors, indexed_colors)?;
+                if let Some(ref props) = current_props {
+                    if props.has_rich_formatting {
+                        has_any_rich_formatting = true;
+                    }
                 }
             }
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"rPh" => {
                 is_phonetic_text = true;
             }
-            Ok(Event::End(e)) if e.name() == closing => {
-                if rich_buffer.is_none() {
-                    // An empty <s></s> element, without <t> or other
-                    // subelements, is treated as a valid empty string in Excel.
-                    rich_buffer = Some(String::new());
-                }
-
-                return Ok(rich_buffer);
-            }
             Ok(Event::End(e)) if e.local_name().as_ref() == b"rPh" => {
                 is_phonetic_text = false;
             }
+            Ok(Event::End(e)) if e.name() == closing => {
+                // End of string item
+                if is_rich_text && !runs.is_empty() {
+                    // Preserve RichText whenever any run carries explicit font properties.
+                    if has_any_rich_formatting {
+                        return Ok(Some(Data::RichText(RichText::from_runs(runs))));
+                    } else {
+                        // All runs are plain text or only have non-rich style info, concatenate them
+                        let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+                        return Ok(Some(Data::String(text)));
+                    }
+                } else if let Some(text) = plain_text {
+                    return Ok(Some(Data::String(text)));
+                } else if is_rich_text {
+                    // Rich text with no runs means empty string
+                    return Ok(Some(Data::String(String::new())));
+                } else {
+                    // Empty element
+                    return Ok(Some(Data::String(String::new())));
+                }
+            }
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"t" && !is_phonetic_text => {
+                // Text content
                 val_buf.clear();
                 let mut value = String::new();
                 loop {
@@ -1899,12 +3209,25 @@ where
                         _ => (),
                     }
                 }
-                if let Some(s) = &mut rich_buffer {
-                    s.push_str(&value);
+
+                if is_rich_text {
+                    // Add as a run with optional formatting
+                    // Retain every explicit run-font property, including name and size.
+                    let font = current_props
+                        .take()
+                        .filter(|p| p.has_rich_formatting)
+                        .map(|p| p.font);
+                    runs.push(TextRun { text: value, font });
                 } else {
-                    // consume any remaining events up to expected closing tag
+                    // Plain text (not in a run)
+                    if let Some(ref mut pt) = plain_text {
+                        pt.push_str(&value);
+                    } else {
+                        plain_text = Some(value);
+                    }
+                    // Consume remaining and return
                     xml.read_to_end_into(closing, &mut val_buf)?;
-                    return Ok(Some(value));
+                    return Ok(plain_text.map(Data::String));
                 }
             }
             Ok(Event::Eof) => return Err(XlsxError::XmlEof("")),
@@ -2956,9 +4279,43 @@ impl<'a, RS: Read + Seek + 'a> Iterator for PivotCacheIter<'a, RS> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Cursor, Write};
     use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+
+    fn workbook_with_sheet(
+        sheet_xml: &[u8],
+        styles: Vec<Style>,
+        formats: Vec<CellFormat>,
+    ) -> Xlsx<Cursor<Vec<u8>>> {
+        let cursor = Cursor::new(Vec::new());
+        let mut zip_writer = ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip_writer
+            .start_file("xl/worksheets/sheet1.xml", options)
+            .unwrap();
+        zip_writer.write_all(sheet_xml).unwrap();
+        let mut cursor = zip_writer.finish().unwrap();
+        cursor.set_position(0);
+
+        Xlsx {
+            zip: ZipArchive::new(cursor).unwrap(),
+            strings: Vec::new(),
+            sheets: vec![("Sheet1".to_string(), "xl/worksheets/sheet1.xml".to_string())],
+            tables: None,
+            formats,
+            styles,
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
+            is_1904: false,
+            metadata: Metadata::default(),
+            #[cfg(feature = "picture")]
+            pictures: None,
+            merged_regions: None,
+            options: XlsxOptions::default(),
+        }
+    }
 
     #[test]
     fn test_dimensions() {
@@ -3387,9 +4744,959 @@ mod tests {
     }
 
     #[test]
+    fn test_number_format_preserves_raw_escapes_in_style_and_type_detection() {
+        let styles_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="1"><numFmt numFmtId="164" formatCode="\Y000000"/></numFmts>
+  <cellXfs count="1"><xf numFmtId="164"/></cellXfs>
+</styleSheet>"#;
+        let cursor = Cursor::new(Vec::new());
+        let mut zip_writer = ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip_writer.start_file("xl/styles.xml", options).unwrap();
+        zip_writer.write_all(styles_xml).unwrap();
+        let mut cursor = zip_writer.finish().unwrap();
+        cursor.set_position(0);
+
+        let mut workbook = Xlsx {
+            zip: ZipArchive::new(cursor).unwrap(),
+            strings: Vec::new(),
+            sheets: Vec::new(),
+            tables: None,
+            formats: Vec::new(),
+            styles: Vec::new(),
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
+            is_1904: false,
+            metadata: Metadata::default(),
+            #[cfg(feature = "picture")]
+            pictures: None,
+            merged_regions: None,
+            options: XlsxOptions::default(),
+        };
+
+        workbook.read_styles().unwrap();
+        assert_eq!(
+            workbook.styles[0]
+                .number_format
+                .as_ref()
+                .unwrap()
+                .format_code,
+            r"\Y000000"
+        );
+        assert_eq!(workbook.formats[0], CellFormat::Other);
+        assert_eq!(detect_custom_number_format("Y000000"), CellFormat::DateTime);
+    }
+
+    #[test]
+    fn test_builtin_number_formats_do_not_fall_back_to_general() {
+        assert_eq!(builtin_number_format_code(4), Some("#,##0.00"));
+        assert_eq!(builtin_number_format_code(5), None);
+        assert_eq!(builtin_number_format_code(8), None);
+        assert_eq!(builtin_number_format_code(23), None);
+        assert_eq!(builtin_number_format_code(41), None);
+        assert_eq!(builtin_number_format_code(44), None);
+        assert_eq!(builtin_number_format_code(164), None);
+    }
+
+    #[test]
+    fn test_cell_xf_apply_flags_suppress_explicitly_disabled_components() {
+        let styles_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts>
+  <fonts count="2"><font/><font><b/></font></fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill>
+  </fills>
+  <borders count="2"><border/><border><left style="thin"/></border></borders>
+  <cellXfs count="2">
+    <xf numFmtId="164" fontId="1" fillId="1" borderId="1"
+        applyNumberFormat="0" applyFont="false" applyFill="0" applyBorder="false"
+        applyAlignment="0" applyProtection="false">
+      <alignment horizontal="center"/>
+      <protection hidden="1"/>
+    </xf>
+    <xf numFmtId="164" fontId="1" fillId="1" borderId="1"
+        applyNumberFormat="1" applyFont="true" applyFill="1" applyBorder="true"
+        applyAlignment="1" applyProtection="true">
+      <alignment horizontal="center"/>
+      <protection hidden="1"/>
+    </xf>
+  </cellXfs>
+</styleSheet>"#;
+        let cursor = Cursor::new(Vec::new());
+        let mut zip_writer = ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip_writer.start_file("xl/styles.xml", options).unwrap();
+        zip_writer.write_all(styles_xml).unwrap();
+        let mut cursor = zip_writer.finish().unwrap();
+        cursor.set_position(0);
+
+        let mut workbook = Xlsx {
+            zip: ZipArchive::new(cursor).unwrap(),
+            strings: Vec::new(),
+            sheets: Vec::new(),
+            tables: None,
+            formats: Vec::new(),
+            styles: Vec::new(),
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
+            is_1904: false,
+            metadata: Metadata::default(),
+            #[cfg(feature = "picture")]
+            pictures: None,
+            merged_regions: None,
+            options: XlsxOptions::default(),
+        };
+
+        workbook.read_styles().unwrap();
+        assert_eq!(workbook.styles.len(), 2);
+        assert!(workbook.styles[0].is_empty());
+        assert_eq!(workbook.formats[0], CellFormat::Other);
+
+        let applied = &workbook.styles[1];
+        assert!(applied.font.as_ref().unwrap().is_bold());
+        assert_eq!(
+            applied.fill.as_ref().unwrap().foreground_color,
+            Some(crate::Color::rgb(255, 0, 0))
+        );
+        assert_eq!(
+            applied.borders.as_ref().unwrap().left.style,
+            crate::BorderStyle::Thin
+        );
+        assert_eq!(applied.number_format.as_ref().unwrap().format_id, Some(164));
+        assert_eq!(
+            applied.alignment.as_ref().unwrap().horizontal,
+            crate::HorizontalAlignment::Center
+        );
+        assert!(applied.protection.as_ref().unwrap().locked);
+        assert!(applied.protection.as_ref().unwrap().hidden);
+        assert_eq!(workbook.formats[1], CellFormat::DateTime);
+    }
+
+    #[test]
+    fn test_cell_xfs_inherit_base_style_xfs_before_applying_overrides() {
+        let styles_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts>
+  <fonts count="2">
+    <font><name val="Base Font"/></font>
+    <font><name val="Override Font"/></font>
+  </fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill>
+  </fills>
+  <borders count="2"><border/><border><left style="thin"/></border></borders>
+  <cellStyleXfs count="1">
+    <xf numFmtId="164" fontId="0" fillId="1" borderId="1">
+      <alignment horizontal="center"/>
+      <protection hidden="1"/>
+    </xf>
+  </cellStyleXfs>
+  <cellXfs count="2">
+    <xf xfId="0" numFmtId="0" fontId="1" fillId="0" borderId="0"
+        applyNumberFormat="0" applyFont="0" applyFill="0" applyBorder="0"
+        applyAlignment="0" applyProtection="0">
+      <alignment horizontal="left"/>
+      <protection locked="0" hidden="0"/>
+    </xf>
+    <xf xfId="0" numFmtId="0" fontId="1" fillId="0" borderId="0"
+        applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1"
+        applyAlignment="1" applyProtection="1">
+      <alignment horizontal="left"/>
+      <protection locked="0" hidden="0"/>
+    </xf>
+  </cellXfs>
+</styleSheet>"#;
+        let cursor = Cursor::new(Vec::new());
+        let mut zip_writer = ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip_writer.start_file("xl/styles.xml", options).unwrap();
+        zip_writer.write_all(styles_xml).unwrap();
+        let mut cursor = zip_writer.finish().unwrap();
+        cursor.set_position(0);
+
+        let mut workbook = Xlsx {
+            zip: ZipArchive::new(cursor).unwrap(),
+            strings: Vec::new(),
+            sheets: Vec::new(),
+            tables: None,
+            formats: Vec::new(),
+            styles: Vec::new(),
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
+            is_1904: false,
+            metadata: Metadata::default(),
+            #[cfg(feature = "picture")]
+            pictures: None,
+            merged_regions: None,
+            options: XlsxOptions::default(),
+        };
+
+        workbook.read_styles().unwrap();
+        assert_eq!(workbook.styles.len(), 2);
+
+        let inherited = &workbook.styles[0];
+        assert_eq!(
+            inherited.font.as_ref().unwrap().name.as_deref(),
+            Some("Base Font")
+        );
+        assert_eq!(
+            inherited.fill.as_ref().unwrap().foreground_color,
+            Some(crate::Color::rgb(255, 0, 0))
+        );
+        assert_eq!(
+            inherited.borders.as_ref().unwrap().left.style,
+            crate::BorderStyle::Thin
+        );
+        assert_eq!(
+            inherited.number_format.as_ref().unwrap().format_id,
+            Some(164)
+        );
+        assert_eq!(
+            inherited.alignment.as_ref().unwrap().horizontal,
+            crate::HorizontalAlignment::Center
+        );
+        assert!(inherited.protection.as_ref().unwrap().locked);
+        assert!(inherited.protection.as_ref().unwrap().hidden);
+        assert_eq!(workbook.formats[0], CellFormat::DateTime);
+
+        let overridden = &workbook.styles[1];
+        assert_eq!(
+            overridden.font.as_ref().unwrap().name.as_deref(),
+            Some("Override Font")
+        );
+        assert_eq!(
+            overridden.fill.as_ref().unwrap().pattern,
+            crate::FillPattern::None
+        );
+        assert_eq!(
+            overridden.borders.as_ref().unwrap().left.style,
+            crate::BorderStyle::None
+        );
+        assert_eq!(
+            overridden.number_format.as_ref().unwrap().format_id,
+            Some(0)
+        );
+        assert_eq!(
+            overridden.alignment.as_ref().unwrap().horizontal,
+            crate::HorizontalAlignment::Left
+        );
+        assert!(!overridden.protection.as_ref().unwrap().locked);
+        assert!(!overridden.protection.as_ref().unwrap().hidden);
+        assert_eq!(workbook.formats[1], CellFormat::Other);
+    }
+
+    #[test]
+    fn test_custom_theme_colors_feed_style_and_rich_text_parsers() {
+        let theme_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <a:themeElements><a:clrScheme name="Custom">
+    <a:dk1><a:sysClr val="windowText" lastClr="102030"/></a:dk1>
+    <a:accent1><a:srgbClr val="A1B2C3"/></a:accent1>
+  </a:clrScheme></a:themeElements>
+</a:theme>"#;
+        let cursor = Cursor::new(Vec::new());
+        let mut zip_writer = ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip_writer
+            .start_file("xl/theme/theme1.xml", options)
+            .unwrap();
+        zip_writer.write_all(theme_xml).unwrap();
+        let mut cursor = zip_writer.finish().unwrap();
+        cursor.set_position(0);
+
+        let mut workbook = Xlsx {
+            zip: ZipArchive::new(cursor).unwrap(),
+            strings: Vec::new(),
+            sheets: Vec::new(),
+            tables: None,
+            formats: Vec::new(),
+            styles: Vec::new(),
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
+            is_1904: false,
+            metadata: Metadata::default(),
+            #[cfg(feature = "picture")]
+            pictures: None,
+            merged_regions: None,
+            options: XlsxOptions::default(),
+        };
+        // Missing relationship metadata retains the conventional theme1.xml
+        // fallback that older versions supported.
+        workbook.read_theme(None).unwrap();
+        assert_eq!(
+            workbook.theme_colors[1],
+            crate::Color::rgb(0x10, 0x20, 0x30)
+        );
+        assert_eq!(
+            workbook.theme_colors[4],
+            crate::Color::rgb(0xA1, 0xB2, 0xC3)
+        );
+        assert_eq!(workbook.theme_colors[0], crate::Color::rgb(255, 255, 255));
+
+        let mut font_xml = XmlReader::from_reader(Cursor::new(
+            br#"<font><color theme="4"/></font>"#.as_slice(),
+        ));
+        font_xml.config_mut().expand_empty_elements = true;
+        let mut buf = Vec::new();
+        let start = match font_xml.read_event_into(&mut buf).unwrap() {
+            Event::Start(element) => element.into_owned(),
+            event => panic!("expected font start, got {event:?}"),
+        };
+        let font = style_parser::parse_font(
+            &mut font_xml,
+            &start,
+            &workbook.theme_colors,
+            &workbook.indexed_colors,
+        )
+        .unwrap();
+        assert_eq!(font.color, Some(crate::Color::rgb(0xA1, 0xB2, 0xC3)));
+
+        let mut color_xml =
+            XmlReader::from_reader(Cursor::new(br#"<color theme="4"/>"#.as_slice()));
+        let mut buf = Vec::new();
+        let color_element = match color_xml.read_event_into(&mut buf).unwrap() {
+            Event::Empty(element) => element.into_owned(),
+            event => panic!("expected color element, got {event:?}"),
+        };
+        assert_eq!(
+            parse_run_color(
+                &color_element,
+                &workbook.theme_colors,
+                &workbook.indexed_colors,
+            )
+            .unwrap(),
+            Some(crate::Color::rgb(0xA1, 0xB2, 0xC3))
+        );
+    }
+
+    #[test]
+    fn test_theme_tint_feeds_style_and_rich_text_parsers() {
+        let mut font_xml = XmlReader::from_reader(Cursor::new(
+            br#"<font><color theme="4" tint="0.4"/></font>"#.as_slice(),
+        ));
+        font_xml.config_mut().expand_empty_elements = true;
+        let mut buf = Vec::new();
+        let start = match font_xml.read_event_into(&mut buf).unwrap() {
+            Event::Start(element) => element.into_owned(),
+            event => panic!("expected font start, got {event:?}"),
+        };
+        let font = style_parser::parse_font(
+            &mut font_xml,
+            &start,
+            &style_parser::DEFAULT_THEME_COLORS,
+            &style_parser::NO_INDEXED_COLOR_OVERRIDES,
+        )
+        .unwrap();
+        let expected = crate::Color::rgb(0x95, 0xB3, 0xD7);
+        assert_eq!(font.color, Some(expected));
+
+        let mut color_xml =
+            XmlReader::from_reader(Cursor::new(br#"<color theme="4" tint="0.4"/>"#.as_slice()));
+        let mut buf = Vec::new();
+        let color_element = match color_xml.read_event_into(&mut buf).unwrap() {
+            Event::Empty(element) => element.into_owned(),
+            event => panic!("expected color element, got {event:?}"),
+        };
+        assert_eq!(
+            parse_run_color(
+                &color_element,
+                &style_parser::DEFAULT_THEME_COLORS,
+                &style_parser::NO_INDEXED_COLOR_OVERRIDES,
+            )
+            .unwrap(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn test_theme_part_comes_from_workbook_relationship() {
+        let relationships_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rIdLegacy" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="xl/worksheets/legacy.xml"/>
+  <Relationship Id="rIdEscaped" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="customThemes/A&amp;B.xml"/>
+  <Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="customThemes/ocean.xml"/>
+  <Relationship Id="rIdExternal" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="https://example.invalid/theme.xml" TargetMode="External"/>
+</Relationships>"#;
+        let theme_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <a:themeElements><a:clrScheme name="Ocean">
+    <a:accent1><a:srgbClr val="123456"/></a:accent1>
+  </a:clrScheme></a:themeElements>
+</a:theme>"#;
+        let cursor = Cursor::new(Vec::new());
+        let mut zip_writer = ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip_writer
+            .start_file("xl/_rels/workbook.xml.rels", options)
+            .unwrap();
+        zip_writer.write_all(relationships_xml).unwrap();
+        zip_writer
+            .start_file("xl/customThemes/ocean.xml", options)
+            .unwrap();
+        zip_writer.write_all(theme_xml).unwrap();
+        zip_writer
+            .start_file("xl/worksheets/legacy.xml", options)
+            .unwrap();
+        zip_writer.write_all(b"<worksheet/>").unwrap();
+        let mut cursor = zip_writer.finish().unwrap();
+        cursor.set_position(0);
+
+        let mut workbook = Xlsx {
+            zip: ZipArchive::new(cursor).unwrap(),
+            strings: Vec::new(),
+            sheets: Vec::new(),
+            tables: None,
+            formats: Vec::new(),
+            styles: Vec::new(),
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
+            is_1904: false,
+            metadata: Metadata::default(),
+            #[cfg(feature = "picture")]
+            pictures: None,
+            merged_regions: None,
+            options: XlsxOptions::default(),
+        };
+
+        let relationships = workbook.read_relationships().unwrap();
+        assert_eq!(
+            relationships.targets.get(b"rId1".as_slice()),
+            Some(&"worksheets/sheet1.xml".to_string())
+        );
+        assert_eq!(
+            relationships.targets.get(b"rIdLegacy".as_slice()),
+            Some(&"/xl/worksheets/legacy.xml".to_string())
+        );
+        assert_eq!(
+            relationships.targets.get(b"rIdEscaped".as_slice()),
+            Some(&"customThemes/A&B.xml".to_string())
+        );
+        assert_eq!(
+            relationships.theme_path.as_deref(),
+            Some("xl/customThemes/ocean.xml")
+        );
+        workbook
+            .read_theme(relationships.theme_path.as_deref())
+            .unwrap();
+        assert_eq!(
+            workbook.theme_colors[4],
+            crate::Color::rgb(0x12, 0x34, 0x56)
+        );
+
+        assert_eq!(
+            resolve_workbook_relationship_target("/xl/theme/theme1.xml").unwrap(),
+            "xl/theme/theme1.xml"
+        );
+        assert_eq!(
+            resolve_workbook_relationship_target("xl/theme/theme1.xml").unwrap(),
+            "xl/xl/theme/theme1.xml"
+        );
+        assert!(resolve_workbook_relationship_target("../../outside.xml").is_err());
+    }
+
+    #[test]
+    fn test_custom_indexed_colors_feed_style_and_rich_text_parsers() {
+        let mut styles_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><color indexed="2"/></font></fonts>
+  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+  <borders count="1"><border/></borders>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellXfs>
+  <colors><indexedColors>
+    <rgbColor rgb="FF000000"/><rgbColor/><rgbColor rgb="FF112233"/>"#
+            .to_string();
+        // CT_IndexedColors is unbounded. Only the first 64 slots are retained,
+        // but extra schema-valid entries must not reject the workbook.
+        styles_xml.push_str(&r#"<rgbColor rgb="FFABCDEF"/>"#.repeat(62));
+        styles_xml.push_str("</indexedColors></colors></styleSheet>");
+        let shared_strings_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <si><r><rPr><color indexed="2"/></rPr><t>custom</t></r></si>
+</sst>"#;
+        let cursor = Cursor::new(Vec::new());
+        let mut zip_writer = ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip_writer.start_file("xl/styles.xml", options).unwrap();
+        zip_writer.write_all(styles_xml.as_bytes()).unwrap();
+        zip_writer
+            .start_file("xl/sharedStrings.xml", options)
+            .unwrap();
+        zip_writer.write_all(shared_strings_xml).unwrap();
+        let mut cursor = zip_writer.finish().unwrap();
+        cursor.set_position(0);
+
+        let mut workbook = Xlsx {
+            zip: ZipArchive::new(cursor).unwrap(),
+            strings: Vec::new(),
+            sheets: Vec::new(),
+            tables: None,
+            formats: Vec::new(),
+            styles: Vec::new(),
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
+            is_1904: false,
+            metadata: Metadata::default(),
+            #[cfg(feature = "picture")]
+            pictures: None,
+            merged_regions: None,
+            options: XlsxOptions::default(),
+        };
+
+        workbook.read_indexed_colors().unwrap();
+        workbook.read_shared_strings().unwrap();
+        workbook.read_styles().unwrap();
+        let expected = crate::Color::rgb(0x11, 0x22, 0x33);
+        assert_eq!(workbook.indexed_colors[1], None);
+        assert_eq!(
+            style_parser::get_indexed_color(1, &workbook.indexed_colors),
+            crate::Color::rgb(255, 255, 255)
+        );
+        assert_eq!(workbook.indexed_colors[2], Some(expected));
+        assert_eq!(
+            workbook.styles[0].font.as_ref().unwrap().color,
+            Some(expected)
+        );
+        match &workbook.strings[0] {
+            Data::RichText(rich_text) => {
+                assert_eq!(
+                    rich_text.runs[0].font.as_ref().unwrap().color,
+                    Some(expected)
+                );
+            }
+            value => panic!("expected rich text, got {value:?}"),
+        }
+    }
+
+    #[test]
+    fn test_grouped_column_span_is_inclusive_and_bounded() {
+        assert_eq!(
+            worksheet_column_span(2, Some(5))
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert!(worksheet_column_span(0, Some(1)).is_err());
+        assert!(worksheet_column_span(5, Some(4)).is_err());
+        assert!(worksheet_column_span(1, Some(MAX_COLUMNS + 1)).is_err());
+    }
+
+    #[test]
+    fn test_reader_trait_layout_delegates_to_inherent_parser() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetFormatPr defaultColWidth="8.5" defaultRowHeight="15"/>
+  <cols><col min="2" max="5" width="20" customWidth="1"/></cols>
+  <sheetData></sheetData>
+</worksheet>"#;
+        let mut workbook = workbook_with_sheet(sheet_xml, Vec::new(), Vec::new());
+
+        let layout = Reader::worksheet_layout(&mut workbook, "Sheet1").unwrap();
+        assert_eq!(layout.default_column_width, Some(8.5));
+        assert_eq!(layout.default_row_height, Some(15.0));
+        assert_eq!(layout.column_widths.len(), 4);
+        for column in 1..=4 {
+            let width = layout.get_column_width(column).unwrap();
+            assert_eq!(width.width, 20.0);
+            assert!(width.custom_width);
+        }
+    }
+
+    #[test]
+    fn test_worksheet_style_compacts_workbook_palette() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData><row r="1"><c r="A1" s="3"></c><c r="C1" s="1"></c><c r="E1" s="3"></c></row></sheetData>
+</worksheet>"#;
+        let named_style =
+            |name: &str| Style::new().with_font(Font::new().with_name(name.to_string()));
+        let workbook_styles = vec![
+            Style::default(),
+            named_style("used-one"),
+            named_style("unused-two"),
+            named_style("used-three"),
+        ];
+        let mut workbook = workbook_with_sheet(sheet_xml, workbook_styles, Vec::new());
+
+        let styles = workbook.worksheet_style("Sheet1").unwrap();
+
+        assert_eq!(styles.unique_style_count(), 2);
+        assert_eq!(
+            styles
+                .get((0, 0))
+                .unwrap()
+                .get_font()
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("used-three")
+        );
+        assert!(styles.get((0, 1)).unwrap().is_empty());
+        assert_eq!(
+            styles
+                .get((0, 2))
+                .unwrap()
+                .get_font()
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("used-one")
+        );
+        assert!(styles.get((0, 3)).unwrap().is_empty());
+        assert_eq!(
+            styles
+                .get((0, 4))
+                .unwrap()
+                .get_font()
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("used-three")
+        );
+    }
+
+    #[test]
+    fn test_worksheet_style_preserves_explicit_cell_xf_zero() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData><row r="1"><c r="A1" s="0"/><c r="B1"/></row></sheetData>
+</worksheet>"#;
+        let style_zero = Style::new().with_font(Font::new().with_name("cell-xf-zero".to_string()));
+        let mut workbook = workbook_with_sheet(sheet_xml, vec![style_zero], Vec::new());
+
+        let styles = workbook.worksheet_style("Sheet1").unwrap();
+
+        assert_eq!(styles.start(), Some((0, 0)));
+        assert_eq!(styles.end(), Some((0, 0)));
+        assert_eq!(styles.unique_style_count(), 1);
+        assert_eq!(
+            styles
+                .get((0, 0))
+                .unwrap()
+                .get_font()
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("cell-xf-zero")
+        );
+    }
+
+    #[test]
+    fn test_cells_inherit_row_and_column_styles_with_correct_precedence() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <cols><col min="1" max="2" style="1"/></cols>
+  <sheetData>
+    <row r="1" s="2" customFormat="1">
+      <c r="A1"><v>1</v></c>
+      <c r="B1" s="3"><v>2</v></c>
+      <c r="C1"><v>3</v></c>
+      <c r="D1" s="0"><v>4</v></c>
+    </row>
+    <row>
+      <c r="A2"><v>5</v></c>
+      <c r="B2"><v>6</v></c>
+      <c r="C2"><v>7</v></c>
+    </row>
+    <row s="2" customFormat="0">
+      <c r="A3"><v>8</v></c>
+      <c r="C3"><v>9</v></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+        let named_style =
+            |name: &str| Style::new().with_font(Font::new().with_name(name.to_string()));
+        let workbook_styles = vec![
+            named_style("cell-zero"),
+            named_style("column"),
+            named_style("row"),
+            named_style("cell"),
+        ];
+        let formats = vec![
+            CellFormat::Other,
+            CellFormat::DateTime,
+            CellFormat::DateTime,
+            CellFormat::Other,
+        ];
+        let mut workbook = workbook_with_sheet(sheet_xml, workbook_styles.clone(), formats.clone());
+
+        let styles = workbook.worksheet_style("Sheet1").unwrap();
+        let font_name = |row, column| {
+            styles
+                .get((row, column))
+                .and_then(Style::get_font)
+                .and_then(|font| font.name.as_deref())
+        };
+        assert_eq!(font_name(0, 0), Some("row"));
+        assert_eq!(font_name(0, 1), Some("cell"));
+        assert_eq!(font_name(0, 2), Some("row"));
+        assert_eq!(font_name(0, 3), Some("cell-zero"));
+        assert_eq!(font_name(1, 0), Some("column"));
+        assert_eq!(font_name(1, 1), Some("column"));
+        assert!(styles.get((1, 2)).unwrap().is_empty());
+        assert_eq!(font_name(2, 0), Some("column"));
+        assert!(styles.get((2, 2)).unwrap().is_empty());
+
+        let mut streaming_workbook =
+            workbook_with_sheet(sheet_xml, workbook_styles, formats.clone());
+        let first = streaming_workbook
+            .worksheet_cells_reader("Sheet1")
+            .unwrap()
+            .next_cell()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.get_style().unwrap().style_id, Some(2));
+        assert!(matches!(first.get_value(), DataRef::DateTime(_)));
+
+        let mut range_workbook = workbook_with_sheet(sheet_xml, Vec::new(), formats);
+        range_workbook.styles = vec![Style::default(); 4];
+        let range = range_workbook.worksheet_range_ref("Sheet1").unwrap();
+        assert!(matches!(range.get((0, 0)), Some(DataRef::DateTime(_))));
+        assert!(matches!(range.get((1, 0)), Some(DataRef::DateTime(_))));
+    }
+
+    #[test]
+    fn test_omitted_cell_style_uses_xf_zero_for_value_conversion_only() {
+        let sheet_xml = br#"<worksheet>
+  <sheetData><row r="1"><c r="A1"><v>2</v></c></row></sheetData>
+</worksheet>"#;
+        let style_zero = Style::new().with_font(Font::new().with_name("default-xf".to_string()));
+
+        let mut streaming_workbook = workbook_with_sheet(
+            sheet_xml,
+            vec![style_zero.clone()],
+            vec![CellFormat::DateTime],
+        );
+        let cell = streaming_workbook
+            .worksheet_cells_reader("Sheet1")
+            .unwrap()
+            .next_cell()
+            .unwrap()
+            .unwrap();
+        assert_eq!(cell.get_style().unwrap().style_id, Some(0));
+        assert!(matches!(cell.get_value(), DataRef::DateTime(_)));
+
+        let mut range_workbook = workbook_with_sheet(
+            sheet_xml,
+            vec![style_zero.clone()],
+            vec![CellFormat::DateTime],
+        );
+        let range = range_workbook.worksheet_range_ref("Sheet1").unwrap();
+        assert!(matches!(range.get((0, 0)), Some(DataRef::DateTime(_))));
+
+        let mut style_workbook =
+            workbook_with_sheet(sheet_xml, vec![style_zero], vec![CellFormat::DateTime]);
+        assert!(style_workbook.worksheet_style("Sheet1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_layout_boolean_lexical_forms_and_malformed_values() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <cols><col min="1" max="1" width="20" customWidth="false" hidden="false" bestFit="true"/></cols>
+  <sheetData><row r="1" ht="18" customHeight="true" hidden="false" thickTop="false" thickBot="true"/></sheetData>
+</worksheet>"#;
+        let mut workbook = workbook_with_sheet(sheet_xml, Vec::new(), Vec::new());
+        let layout = workbook.worksheet_layout("Sheet1").unwrap();
+        let column = layout.get_column_width(0).unwrap();
+        assert!(!column.custom_width);
+        assert!(!column.hidden);
+        assert!(column.best_fit);
+        let row = layout.get_row_height(0).unwrap();
+        assert!(row.custom_height);
+        assert!(!row.hidden);
+        assert!(!row.thick_top);
+        assert!(row.thick_bottom);
+
+        let malformed = br#"<worksheet><cols><col min="1" max="1" hidden="sometimes"/></cols><sheetData/></worksheet>"#;
+        let mut malformed_workbook = workbook_with_sheet(malformed, Vec::new(), Vec::new());
+        assert!(malformed_workbook.worksheet_layout("Sheet1").is_err());
+    }
+
+    #[test]
+    fn test_layout_widthless_columns_inherit_defaults_and_explicit_zero() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetFormatPr defaultColWidth="9.5"/>
+  <cols>
+    <col min="1" max="1" hidden="1"/>
+    <col min="2" max="2" style="3"/>
+    <col min="3" max="3" width="0" customWidth="1"/>
+  </cols>
+  <sheetData/>
+</worksheet>"#;
+        let mut workbook = workbook_with_sheet(sheet_xml, Vec::new(), Vec::new());
+
+        let layout = workbook.worksheet_layout("Sheet1").unwrap();
+
+        let hidden_column = layout.get_column_width(0).unwrap();
+        assert_eq!(hidden_column.width, 9.5);
+        assert!(hidden_column.hidden);
+        assert_eq!(layout.get_column_width(1).unwrap().width, 9.5);
+        let zero_width_column = layout.get_column_width(2).unwrap();
+        assert_eq!(zero_width_column.width, 0.0);
+        assert!(zero_width_column.custom_width);
+
+        let library_default_xml = br#"<worksheet>
+  <cols><col min="1" max="1" hidden="1"/></cols>
+  <sheetData/>
+</worksheet>"#;
+        let mut library_default_workbook =
+            workbook_with_sheet(library_default_xml, Vec::new(), Vec::new());
+
+        let library_default_layout = library_default_workbook.worksheet_layout("Sheet1").unwrap();
+        assert_eq!(
+            library_default_layout.get_column_width(0).unwrap().width,
+            DEFAULT_COLUMN_WIDTH
+        );
+    }
+
+    #[test]
+    fn test_layout_tracks_implicit_row_indexes() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row ht="18" customHeight="1"/>
+    <row/>
+    <row ht="20" customHeight="1"/>
+    <row r="5" ht="22" customHeight="1"/>
+    <row ht="24" customHeight="1"/>
+  </sheetData>
+</worksheet>"#;
+        let mut workbook = workbook_with_sheet(sheet_xml, Vec::new(), Vec::new());
+
+        let layout = workbook.worksheet_layout("Sheet1").unwrap();
+
+        assert_eq!(layout.get_row_height(0).unwrap().height, 18.0);
+        assert!(layout.get_row_height(1).is_none());
+        assert_eq!(layout.get_row_height(2).unwrap().height, 20.0);
+        assert_eq!(layout.get_row_height(4).unwrap().height, 22.0);
+        assert_eq!(layout.get_row_height(5).unwrap().height, 24.0);
+    }
+
+    #[test]
+    fn test_layout_metadata_only_rows_inherit_defaults_and_explicit_zero() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetFormatPr defaultRowHeight="17.5"/>
+  <sheetData>
+    <row hidden="1"/>
+    <row r="3" thickTop="1"/>
+    <row thickBot="1"/>
+    <row r="6" ht="0"/>
+    <row r="7" ht="invalid"/>
+    <row r="8" ht="invalid" customHeight="1"/>
+  </sheetData>
+</worksheet>"#;
+        let mut workbook = workbook_with_sheet(sheet_xml, Vec::new(), Vec::new());
+
+        let layout = workbook.worksheet_layout("Sheet1").unwrap();
+
+        let hidden_row = layout.get_row_height(0).unwrap();
+        assert_eq!(hidden_row.height, 17.5);
+        assert!(hidden_row.hidden);
+        assert!(layout.get_row_height(1).is_none());
+        let explicit_row = layout.get_row_height(2).unwrap();
+        assert_eq!(explicit_row.height, 17.5);
+        assert!(explicit_row.thick_top);
+        let implicit_row_after_explicit = layout.get_row_height(3).unwrap();
+        assert_eq!(implicit_row_after_explicit.height, 17.5);
+        assert!(implicit_row_after_explicit.thick_bottom);
+        assert_eq!(layout.get_row_height(5).unwrap().height, 0.0);
+        assert!(layout.get_row_height(6).is_none());
+        assert_eq!(layout.get_row_height(7).unwrap().height, 0.0);
+
+        let library_default_xml = br#"<worksheet>
+  <sheetData><row r="2" hidden="1"/></sheetData>
+</worksheet>"#;
+        let mut library_default_workbook =
+            workbook_with_sheet(library_default_xml, Vec::new(), Vec::new());
+
+        let library_default_layout = library_default_workbook.worksheet_layout("Sheet1").unwrap();
+        assert_eq!(
+            library_default_layout.get_row_height(1).unwrap().height,
+            DEFAULT_ROW_HEIGHT
+        );
+    }
+
+    #[test]
+    fn test_value_only_reader_avoids_styles_but_streaming_reader_retains_them() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData><row r="1"><c r="A1" s="0" t="inlineStr"><is><t>value</t></is></c></row></sheetData>
+</worksheet>"#;
+        let style = Style::new().with_font(Font::new().with_name("heap-backed-font".repeat(64)));
+
+        let mut streaming_workbook =
+            workbook_with_sheet(sheet_xml, vec![style.clone()], vec![CellFormat::Other]);
+        let mut streaming_reader = streaming_workbook.worksheet_cells_reader("Sheet1").unwrap();
+        assert!(streaming_reader.next_cell().unwrap().unwrap().has_style());
+
+        let mut range_workbook =
+            workbook_with_sheet(sheet_xml, vec![style], vec![CellFormat::Other]);
+        let mut range_reader = range_workbook.worksheet_cells_reader("Sheet1").unwrap();
+        assert!(!range_reader
+            .next_cell_value_only()
+            .unwrap()
+            .unwrap()
+            .has_style());
+    }
+
+    #[test]
+    fn test_inline_string_preserves_rich_text_and_zero_based_indexed_color() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is>
+        <r><rPr><b/><color indexed="2"/></rPr><t>Red</t></r>
+        <r><t> text</t></r>
+      </is></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+        let mut workbook = workbook_with_sheet(sheet_xml, Vec::new(), Vec::new());
+        let range = workbook.worksheet_range_ref("Sheet1").unwrap();
+
+        match range.get((0, 0)) {
+            Some(DataRef::RichText(rich_text)) => {
+                assert_eq!(rich_text.plain_text(), "Red text");
+                assert_eq!(rich_text.runs.len(), 2);
+                let font = rich_text.runs[0].font.as_ref().unwrap();
+                assert!(font.is_bold());
+                assert_eq!(font.color, Some(crate::Color::rgb(255, 0, 0)));
+            }
+            value => panic!("inline rich text was not preserved: {value:?}"),
+        }
+    }
+
+    #[test]
+    fn test_empty_inline_string_remains_present() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData><row r="1"><c r="B1" t="inlineStr"><is><t></t></is></c></row></sheetData>
+</worksheet>"#;
+        let mut workbook = workbook_with_sheet(sheet_xml, Vec::new(), Vec::new());
+        let range = workbook.worksheet_range_ref("Sheet1").unwrap();
+        assert_eq!(range.start(), Some((0, 1)));
+        assert_eq!(range.end(), Some((0, 1)));
+        assert_eq!(range.get((0, 0)), Some(&DataRef::String(String::new())));
+    }
+
+    #[test]
     fn test_read_shared_strings_with_namespaced_si_name() {
         let shared_strings_data = br#"<?xml version="1.0" encoding="utf-8"?>
-<x:sst count="1187" uniqueCount="1187" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<x:sst count="4" uniqueCount="4" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
     <x:si>
         <x:t>String 1</x:t>
     </x:si>
@@ -3406,9 +5713,20 @@ mod tests {
             <x:t>String 3</x:t>
         </x:r>
     </x:si>
+    <x:si>
+        <x:r>
+            <x:rPr>
+                <x:b val="false"/>
+                <x:i val="0"/>
+                <x:u val="none"/>
+                <x:strike val="false"/>
+            </x:rPr>
+            <x:t>String 4</x:t>
+        </x:r>
+    </x:si>
 </x:sst>"#;
 
-        let mut buf = [0; 1000];
+        let mut buf = [0; 2000];
         let mut zip_writer = ZipWriter::new(std::io::Cursor::new(&mut buf[..]));
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -3426,6 +5744,9 @@ mod tests {
             sheets: vec![],
             tables: None,
             formats: vec![],
+            styles: Vec::new(),
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
             is_1904: false,
             metadata: Metadata::default(),
             #[cfg(feature = "picture")]
@@ -3435,9 +5756,25 @@ mod tests {
         };
 
         assert!(xlsx.read_shared_strings().is_ok());
-        assert_eq!(3, xlsx.strings.len());
-        assert_eq!("String 1", &xlsx.strings[0]);
-        assert_eq!("String 2", &xlsx.strings[1]);
-        assert_eq!("String 3", &xlsx.strings[2]);
+        assert_eq!(4, xlsx.strings.len());
+        assert_eq!(Data::String("String 1".to_string()), xlsx.strings[0]);
+        match &xlsx.strings[1] {
+            Data::RichText(rich_text) => {
+                assert_eq!(rich_text.plain_text(), "String 2");
+                assert_eq!(rich_text.runs[0].font.as_ref().unwrap().size, Some(11.0));
+            }
+            value => panic!("font-only rich text was collapsed: {value:?}"),
+        }
+        assert_eq!(Data::String("String 3".to_string()), xlsx.strings[2]);
+        match &xlsx.strings[3] {
+            Data::RichText(rich_text) => {
+                let font = rich_text.runs[0].font.as_ref().unwrap();
+                assert!(!font.is_bold());
+                assert!(!font.is_italic());
+                assert!(!font.has_underline());
+                assert!(!font.has_strikethrough());
+            }
+            value => panic!("explicit run overrides were collapsed: {value:?}"),
+        }
     }
 }

@@ -1,17 +1,27 @@
 [package]
-name = "calamine"
-version = "0.33.0"
-authors = ["Johann Tuffe <tafia973@gmail.com>"]
-repository = "https://github.com/tafia/calamine"
-documentation = "https://docs.rs/calamine"
-description = "An Excel/OpenDocument Spreadsheet reader and deserializer in pure Rust"
+name = "calamine-styles"
+version = "0.1.0"
+authors = [
+    "Johann Tuffe <tafia973@gmail.com>",
+    "Wolfgang Schoenberger",
+]
+repository = "https://github.com/SynthGL/calamine"
+documentation = "https://docs.rs/calamine-styles"
+description = "Fork of calamine with Font, Fill, Border, Alignment, and NumberFormat style parsing for xlsx"
 license = "MIT"
 readme = "README.md"
-keywords = ["excel", "ods", "xls", "xlsx", "xlsb"]
+keywords = ["excel", "xlsx", "styles", "calamine", "formatting"]
 categories = ["encoding", "parsing", "text-processing"]
 exclude = ["tests/**/*"]
 edition = "2021"
 rust-version = "1.83" # For quick-xml + encoding_rs.
+autobenches = false
+
+[lib]
+# Preserve calamine's public crate path even though the published package has
+# a distinct name. This keeps upstream tests, examples, and downstream source
+# compatible while Cargo can install both packages explicitly.
+name = "calamine"
 
 [dependencies]
 log = "0.4"
@@ -33,6 +43,18 @@ sha2 = "0.10"
 env_logger = "0.11"
 serde_derive = "1.0"
 rstest = { version = "0.26", default-features = false }
+rust_xlsxwriter = "0.93"
+# Criterion 0.8 requires Rust 1.86; keep development targets honest at the
+# crate's declared Rust 1.83 floor.
+criterion = "0.5"
+
+[[example]]
+name = "generate_styles_1M"
+path = "benches/generate_styles_1M.rs"
+
+[[bench]]
+name = "style"
+harness = false
 
 [features]
 default = []

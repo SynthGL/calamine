@@ -10,6 +10,8 @@ use serde::de::Visitor;
 use serde::Deserialize;
 
 use super::CellErrorType;
+use super::RichText;
+use super::Style;
 
 // Constants used in Excel date calculations.
 const DAY_SECONDS: f64 = 24.0 * 60.0 * 60.;
@@ -30,6 +32,57 @@ const EXCEL_1900_1904_DIFF: f64 = 1462.;
 #[cfg(feature = "chrono")]
 const MS_MULTIPLIER: f64 = 24f64 * 60f64 * 60f64 * 1e+3f64;
 
+/// A struct that combines cell value and style information
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CellData {
+    /// The cell value
+    pub value: Data,
+    /// The cell style
+    pub style: Option<Style>,
+}
+
+impl CellData {
+    /// Create a new CellData with just a value
+    pub fn new(value: Data) -> Self {
+        Self { value, style: None }
+    }
+
+    /// Create a new CellData with value and style
+    pub fn with_style(value: Data, style: Style) -> Self {
+        Self {
+            value,
+            style: Some(style),
+        }
+    }
+
+    /// Get the cell value
+    pub fn get_value(&self) -> &Data {
+        &self.value
+    }
+
+    /// Get the cell style
+    pub fn get_style(&self) -> Option<&Style> {
+        self.style.as_ref()
+    }
+
+    /// Check if the cell has style information
+    pub fn has_style(&self) -> bool {
+        self.style.is_some()
+    }
+}
+
+impl From<Data> for CellData {
+    fn from(value: Data) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<CellData> for Data {
+    fn from(cell_data: CellData) -> Self {
+        cell_data.value
+    }
+}
+
 /// An enum to represent all different data types that can appear as
 /// a value in a worksheet cell
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -40,6 +93,8 @@ pub enum Data {
     Float(f64),
     /// String
     String(String),
+    /// Rich text with multiple formatted runs
+    RichText(RichText),
     /// Boolean
     Bool(bool),
     /// Date or Time
@@ -71,7 +126,11 @@ impl DataType for Data {
         matches!(*self, Data::Bool(_))
     }
     fn is_string(&self) -> bool {
-        matches!(*self, Data::String(_))
+        matches!(*self, Data::String(_) | Data::RichText(_))
+    }
+
+    fn is_rich_text(&self) -> bool {
+        matches!(*self, Data::RichText(_))
     }
 
     fn is_duration_iso(&self) -> bool {
@@ -119,6 +178,14 @@ impl DataType for Data {
         }
     }
 
+    fn get_rich_text(&self) -> Option<&RichText> {
+        if let Data::RichText(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+
     fn get_datetime(&self) -> Option<ExcelDateTime> {
         match self {
             Data::DateTime(v) => Some(*v),
@@ -152,6 +219,7 @@ impl DataType for Data {
             Data::Float(v) => Some(v.to_string()),
             Data::Int(v) => Some(v.to_string()),
             Data::String(v) => Some(v.clone()),
+            Data::RichText(v) => Some(v.plain_text()),
             _ => None,
         }
     }
@@ -162,6 +230,10 @@ impl DataType for Data {
             Data::Float(v) => Some(*v as i64),
             Data::Bool(v) => Some(*v as i64),
             Data::String(v) => atoi_simd::parse::<i64>(v.as_bytes()).ok(),
+            Data::RichText(v) => {
+                let text = v.plain_text();
+                atoi_simd::parse::<i64>(text.as_bytes()).ok()
+            }
             _ => None,
         }
     }
@@ -172,20 +244,39 @@ impl DataType for Data {
             Data::Float(v) => Some(*v),
             Data::Bool(v) => Some((*v as i32).into()),
             Data::String(v) => fast_float2::parse(v).ok(),
+            Data::RichText(v) => fast_float2::parse(v.plain_text()).ok(),
             _ => None,
         }
     }
 }
 
+fn rich_text_equals_plain(rich_text: &RichText, mut plain_text: &str) -> bool {
+    for run in &rich_text.runs {
+        let Some(remaining) = plain_text.strip_prefix(run.text.as_str()) else {
+            return false;
+        };
+        plain_text = remaining;
+    }
+    plain_text.is_empty()
+}
+
 impl PartialEq<&str> for Data {
     fn eq(&self, other: &&str) -> bool {
-        matches!(self, Data::String(s) if s == other)
+        match self {
+            Data::String(value) => value == other,
+            Data::RichText(value) => rich_text_equals_plain(value, other),
+            _ => false,
+        }
     }
 }
 
 impl PartialEq<str> for Data {
     fn eq(&self, other: &str) -> bool {
-        matches!(self, Data::String(s) if s == other)
+        match self {
+            Data::String(value) => value == other,
+            Data::RichText(value) => rich_text_equals_plain(value, other),
+            _ => false,
+        }
     }
 }
 
@@ -213,6 +304,7 @@ impl fmt::Display for Data {
             Data::Int(e) => write!(f, "{e}"),
             Data::Float(e) => write!(f, "{e}"),
             Data::String(e) => write!(f, "{e}"),
+            Data::RichText(e) => write!(f, "{e}"),
             Data::Bool(e) => write!(f, "{e}"),
             Data::DateTime(e) => write!(f, "{e}"),
             Data::DateTimeIso(e) => write!(f, "{e}"),
@@ -307,6 +399,7 @@ macro_rules! define_from {
 define_from!(Data::Int, i64);
 define_from!(Data::Float, f64);
 define_from!(Data::String, String);
+define_from!(Data::RichText, RichText);
 define_from!(Data::Bool, bool);
 define_from!(Data::Error, CellErrorType);
 
@@ -346,6 +439,10 @@ pub enum DataRef<'a> {
     String(String),
     /// Shared String
     SharedString(&'a str),
+    /// Shared Rich Text (reference to rich text in shared strings table)
+    SharedRichText(&'a RichText),
+    /// Owned Rich Text (used by inline strings)
+    RichText(RichText),
     /// Boolean
     Bool(bool),
     /// Date or Time
@@ -379,7 +476,17 @@ impl DataType for DataRef<'_> {
     }
 
     fn is_string(&self) -> bool {
-        matches!(*self, DataRef::String(_) | DataRef::SharedString(_))
+        matches!(
+            *self,
+            DataRef::String(_)
+                | DataRef::SharedString(_)
+                | DataRef::SharedRichText(_)
+                | DataRef::RichText(_)
+        )
+    }
+
+    fn is_rich_text(&self) -> bool {
+        matches!(*self, DataRef::SharedRichText(_) | DataRef::RichText(_))
     }
 
     fn is_duration_iso(&self) -> bool {
@@ -430,6 +537,14 @@ impl DataType for DataRef<'_> {
         }
     }
 
+    fn get_rich_text(&self) -> Option<&RichText> {
+        match self {
+            DataRef::SharedRichText(rt) => Some(rt),
+            DataRef::RichText(rt) => Some(rt),
+            _ => None,
+        }
+    }
+
     fn get_datetime(&self) -> Option<ExcelDateTime> {
         match self {
             DataRef::DateTime(v) => Some(*v),
@@ -464,6 +579,8 @@ impl DataType for DataRef<'_> {
             DataRef::Int(v) => Some(v.to_string()),
             DataRef::String(v) => Some(v.clone()),
             DataRef::SharedString(v) => Some(v.to_string()),
+            DataRef::SharedRichText(v) => Some(v.plain_text()),
+            DataRef::RichText(v) => Some(v.plain_text()),
             _ => None,
         }
     }
@@ -475,6 +592,14 @@ impl DataType for DataRef<'_> {
             DataRef::Bool(v) => Some(*v as i64),
             DataRef::String(v) => atoi_simd::parse::<i64>(v.as_bytes()).ok(),
             DataRef::SharedString(v) => atoi_simd::parse::<i64>(v.as_bytes()).ok(),
+            DataRef::SharedRichText(v) => {
+                let text = v.plain_text();
+                atoi_simd::parse::<i64>(text.as_bytes()).ok()
+            }
+            DataRef::RichText(v) => {
+                let text = v.plain_text();
+                atoi_simd::parse::<i64>(text.as_bytes()).ok()
+            }
             _ => None,
         }
     }
@@ -486,6 +611,8 @@ impl DataType for DataRef<'_> {
             DataRef::Bool(v) => Some((*v as i32).into()),
             DataRef::String(v) => fast_float2::parse(v).ok(),
             DataRef::SharedString(v) => fast_float2::parse(v).ok(),
+            DataRef::SharedRichText(v) => fast_float2::parse(v.plain_text()).ok(),
+            DataRef::RichText(v) => fast_float2::parse(v.plain_text()).ok(),
             _ => None,
         }
     }
@@ -493,13 +620,25 @@ impl DataType for DataRef<'_> {
 
 impl PartialEq<&str> for DataRef<'_> {
     fn eq(&self, other: &&str) -> bool {
-        matches!(self, DataRef::String(s) if s == other)
+        match self {
+            DataRef::String(value) => value == other,
+            DataRef::SharedString(value) => value == other,
+            DataRef::SharedRichText(value) => rich_text_equals_plain(value, other),
+            DataRef::RichText(value) => rich_text_equals_plain(value, other),
+            _ => false,
+        }
     }
 }
 
 impl PartialEq<str> for DataRef<'_> {
     fn eq(&self, other: &str) -> bool {
-        matches!(self, DataRef::String(s) if s == other)
+        match self {
+            DataRef::String(value) => value == other,
+            DataRef::SharedString(value) => *value == other,
+            DataRef::SharedRichText(value) => rich_text_equals_plain(value, other),
+            DataRef::RichText(value) => rich_text_equals_plain(value, other),
+            _ => false,
+        }
     }
 }
 
@@ -536,8 +675,11 @@ pub trait DataType {
     /// Assess if datatype is a bool
     fn is_bool(&self) -> bool;
 
-    /// Assess if datatype is a string
+    /// Assess if datatype is a string (includes rich text)
     fn is_string(&self) -> bool;
+
+    /// Assess if datatype is rich text (string with formatting)
+    fn is_rich_text(&self) -> bool;
 
     /// Assess if datatype is a `CellErrorType`
     fn is_error(&self) -> bool;
@@ -560,8 +702,11 @@ pub trait DataType {
     /// Try getting bool value
     fn get_bool(&self) -> Option<bool>;
 
-    /// Try getting string value
+    /// Try getting string value (plain string only, not rich text)
     fn get_string(&self) -> Option<&str>;
+
+    /// Try getting rich text value
+    fn get_rich_text(&self) -> Option<&RichText>;
 
     /// Try getting datetime value
     fn get_datetime(&self) -> Option<ExcelDateTime>;
@@ -575,7 +720,7 @@ pub trait DataType {
     /// Try getting Error value
     fn get_error(&self) -> Option<&CellErrorType>;
 
-    /// Try converting data type into a string
+    /// Try converting data type into a string (includes rich text as plain text)
     fn as_string(&self) -> Option<String>;
 
     /// Try converting data type into an int
@@ -665,6 +810,8 @@ impl<'a> From<DataRef<'a>> for Data {
             DataRef::Float(v) => Data::Float(v),
             DataRef::String(v) => Data::String(v),
             DataRef::SharedString(v) => Data::String(v.into()),
+            DataRef::SharedRichText(v) => Data::RichText(v.clone()),
+            DataRef::RichText(v) => Data::RichText(v),
             DataRef::Bool(v) => Data::Bool(v),
             DataRef::DateTime(v) => Data::DateTime(v),
             DataRef::DateTimeIso(v) => Data::DateTimeIso(v),
@@ -1063,14 +1210,111 @@ mod date_tests {
     }
 }
 
+/// An enum to represent all different data types that can appear as
+/// a value in a worksheet cell
+impl DataType for CellData {
+    fn is_empty(&self) -> bool {
+        self.value.is_empty()
+    }
+    fn is_int(&self) -> bool {
+        self.value.is_int()
+    }
+    fn is_float(&self) -> bool {
+        self.value.is_float()
+    }
+    fn is_bool(&self) -> bool {
+        self.value.is_bool()
+    }
+    fn is_string(&self) -> bool {
+        self.value.is_string()
+    }
+
+    fn is_rich_text(&self) -> bool {
+        self.value.is_rich_text()
+    }
+
+    fn is_duration_iso(&self) -> bool {
+        self.value.is_duration_iso()
+    }
+
+    fn is_datetime(&self) -> bool {
+        self.value.is_datetime()
+    }
+
+    fn is_datetime_iso(&self) -> bool {
+        self.value.is_datetime_iso()
+    }
+
+    fn is_error(&self) -> bool {
+        self.value.is_error()
+    }
+
+    fn get_int(&self) -> Option<i64> {
+        self.value.get_int()
+    }
+    fn get_float(&self) -> Option<f64> {
+        self.value.get_float()
+    }
+    fn get_bool(&self) -> Option<bool> {
+        self.value.get_bool()
+    }
+    fn get_string(&self) -> Option<&str> {
+        self.value.get_string()
+    }
+
+    fn get_rich_text(&self) -> Option<&RichText> {
+        self.value.get_rich_text()
+    }
+
+    fn get_datetime(&self) -> Option<ExcelDateTime> {
+        self.value.get_datetime()
+    }
+
+    fn get_datetime_iso(&self) -> Option<&str> {
+        self.value.get_datetime_iso()
+    }
+
+    fn get_duration_iso(&self) -> Option<&str> {
+        self.value.get_duration_iso()
+    }
+
+    fn get_error(&self) -> Option<&CellErrorType> {
+        self.value.get_error()
+    }
+
+    fn as_string(&self) -> Option<String> {
+        self.value.as_string()
+    }
+
+    fn as_i64(&self) -> Option<i64> {
+        self.value.as_i64()
+    }
+
+    fn as_f64(&self) -> Option<f64> {
+        self.value.as_f64()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_partial_eq() {
+        use crate::TextRun;
+
         assert_eq!(Data::String("value".to_string()), "value");
         assert_eq!(Data::String("value".to_string()), "value"[..]);
+        let rich_text = RichText::from_runs(vec![
+            TextRun::new("Head".to_string()),
+            TextRun::new("er".to_string()),
+        ]);
+        assert_eq!(Data::RichText(rich_text.clone()), "Header");
+        assert_eq!(Data::RichText(rich_text.clone()), "Header"[..]);
+        assert_ne!(Data::RichText(rich_text.clone()), "Header!");
+        assert_eq!(DataRef::SharedRichText(&rich_text), "Header");
+        assert_eq!(DataRef::RichText(rich_text), "Header"[..]);
+        assert_eq!(DataRef::SharedString("Header"), "Header");
         assert_eq!(Data::Float(100.0), 100.0f64);
         assert_eq!(Data::Bool(true), true);
         assert_eq!(Data::Int(100), 100i64);
@@ -1090,6 +1334,26 @@ mod tests {
         assert_eq!(Data::Bool(false).as_f64(), Some(0.0));
         assert_eq!(DataRef::Bool(true).as_f64(), Some(1.0));
         assert_eq!(DataRef::Bool(false).as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn test_rich_text_numeric_conversions_match_plain_strings() {
+        let integer = RichText::from_runs(vec![
+            crate::TextRun::new("12".to_string()),
+            crate::TextRun::new("3".to_string()),
+        ]);
+        let float = RichText::from_runs(vec![
+            crate::TextRun::new("-12".to_string()),
+            crate::TextRun::new(".5".to_string()),
+        ]);
+
+        assert_eq!(Data::RichText(integer.clone()).as_i64(), Some(123));
+        assert_eq!(Data::RichText(float.clone()).as_f64(), Some(-12.5));
+
+        assert_eq!(DataRef::SharedRichText(&integer).as_i64(), Some(123));
+        assert_eq!(DataRef::RichText(integer).as_i64(), Some(123));
+        assert_eq!(DataRef::SharedRichText(&float).as_f64(), Some(-12.5));
+        assert_eq!(DataRef::RichText(float).as_f64(), Some(-12.5));
     }
 
     #[test]

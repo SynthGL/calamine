@@ -65,6 +65,7 @@ fn write_to_csv<W: Write>(output_file: &mut W, range: &Range<Data>) -> std::io::
                 Data::Error(e) => write!(output_file, "{e:?}"),
                 Data::Float(f) => write!(output_file, "{f}"),
                 Data::DateTime(d) => write!(output_file, "{}", d.as_f64()),
+                Data::RichText(value) => write!(output_file, "{}", value.plain_text()),
                 Data::String(s) | Data::DateTimeIso(s) | Data::DurationIso(s) => {
                     write!(output_file, "{s}")
                 }

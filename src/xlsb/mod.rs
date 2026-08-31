@@ -26,6 +26,7 @@ use crate::utils::{push_column, read_f64, read_i32, read_u16, read_u32, read_usi
 use crate::vba::VbaProject;
 use crate::{
     Cell, Data, HeaderRow, Metadata, Range, Reader, ReaderRef, Sheet, SheetType, SheetVisible,
+    StyleRange, WorksheetLayout,
 };
 
 /// A Xlsb specific error
@@ -528,6 +529,24 @@ impl<RS: Read + Seek> Reader<RS> for Xlsb<RS> {
         Ok(Range::from_sparse(cells))
     }
 
+    fn worksheet_style(&mut self, name: &str) -> Result<StyleRange, XlsbError> {
+        if !self.sheets.iter().any(|(sheet_name, _)| sheet_name == name) {
+            return Err(XlsbError::WorksheetNotFound(name.into()));
+        }
+
+        // TODO: Implement XLSB style parsing
+        Ok(StyleRange::empty())
+    }
+
+    fn worksheet_layout(&mut self, name: &str) -> Result<WorksheetLayout, XlsbError> {
+        if !self.sheets.iter().any(|(sheet_name, _)| sheet_name == name) {
+            return Err(XlsbError::WorksheetNotFound(name.into()));
+        }
+
+        // XLSB doesn't support column width/row height information in the same way as XLSX yet
+        Ok(WorksheetLayout::new())
+    }
+
     /// MS-XLSB 2.1.7.62
     fn worksheets(&mut self) -> Vec<(String, Range<Data>)> {
         let sheets = self
@@ -604,6 +623,7 @@ impl<RS: Read + Seek> ReaderRef<RS> for Xlsb<RS> {
                                 cells.first().expect("cells should not be empty").pos.1,
                             ),
                             val: DataRef::Empty,
+                            style: None,
                         },
                     );
                 }

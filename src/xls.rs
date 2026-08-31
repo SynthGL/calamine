@@ -20,7 +20,7 @@ use crate::utils::{push_column, read_f64, read_i16, read_i32, read_u16, read_u32
 use crate::vba::VbaProject;
 use crate::{
     Cell, CellErrorType, Data, Dimensions, HeaderRow, Metadata, Range, Reader, Sheet, SheetType,
-    SheetVisible,
+    SheetVisible, StyleRange, WorksheetLayout,
 };
 
 #[derive(Debug)]
@@ -276,6 +276,24 @@ impl<RS: Read + Seek> Reader<RS> for Xls<RS> {
                 }
             }
         }
+    }
+
+    fn worksheet_style(&mut self, name: &str) -> Result<StyleRange, XlsError> {
+        if !self.sheets.contains_key(name) {
+            return Err(XlsError::WorksheetNotFound(name.into()));
+        }
+
+        // TODO: Implement XLS style parsing
+        Ok(StyleRange::empty())
+    }
+
+    fn worksheet_layout(&mut self, name: &str) -> Result<WorksheetLayout, XlsError> {
+        if !self.sheets.contains_key(name) {
+            return Err(XlsError::WorksheetNotFound(name.into()));
+        }
+
+        // XLS doesn't support column width/row height information in the same way as XLSX
+        Ok(WorksheetLayout::new())
     }
 
     fn worksheets(&mut self) -> Vec<(String, Range<Data>)> {
@@ -727,11 +745,9 @@ fn parse_mul_rk(
         });
     }
 
-    let mut col = col_first as u32;
-
-    for rk in r[4..r.len() - 2].chunks(6) {
+    for (offset, rk) in r[4..r.len() - 2].chunks(6).enumerate() {
+        let col = col_first as u32 + offset as u32;
         cells.push(Cell::new((row as u32, col), rk_num(rk, formats, is_1904)));
-        col += 1;
     }
     Ok(())
 }

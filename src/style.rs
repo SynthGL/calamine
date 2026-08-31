@@ -1146,10 +1146,9 @@ impl StyleRange {
 
             // Use Excel's style_id if available for deduplication
             // This groups cells with the same formatting together
-            let excel_style_id = style.style_id.unwrap_or_else(|| {
-                // Fallback: use palette length as unique ID (no dedup for these)
-                palette.len() as u32
-            });
+            // Fallback uses the next palette ID and does not deduplicate styles
+            // that lack an ID from the source workbook.
+            let excel_style_id = style.style_id.unwrap_or(palette.len() as u32);
 
             let style_id = if let Some(&id) = style_to_id.get(&excel_style_id) {
                 id

@@ -250,6 +250,12 @@ where
                         &self.column_styles,
                         self.styles.len(),
                     )?;
+                    // An omitted cell `s` selects cell XF zero for value
+                    // conversion. Keep that format fallback separate from the
+                    // StyleRange representation, which distinguishes an omitted
+                    // cell style from an explicit or inherited style reference.
+                    let value_style_id = resolved_style_id
+                        .or_else(|| (!has_cell_override && !self.formats.is_empty()).then_some(0));
 
                     if include_style {
                         // The public streaming API exposes the resolved style.
@@ -276,7 +282,7 @@ where
                                     self.is_1904,
                                     &mut self.xml,
                                     &e,
-                                    (&c_element, resolved_style_id),
+                                    (&c_element, value_style_id),
                                 )?;
                             }
                             Ok(Event::End(e)) if e.local_name().as_ref() == b"c" => break,

@@ -1043,6 +1043,18 @@ fn push_style_run(runs: &mut Vec<StyleRun>, style_id: u32, mut count: u64) {
     }
 }
 
+fn build_run_ends(runs: &[StyleRun]) -> Vec<u64> {
+    let mut run_ends = Vec::with_capacity(runs.len());
+    let mut end = 0u64;
+
+    for run in runs {
+        end += u64::from(run.count);
+        run_ends.push(end);
+    }
+
+    run_ends
+}
+
 /// RLE-compressed style storage for a worksheet range.
 ///
 /// Instead of storing one Style per cell (which wastes memory when many cells
@@ -1059,6 +1071,8 @@ pub struct StyleRange {
     palette: Vec<Style>,
     /// RLE-encoded runs in row-major order
     runs: Vec<StyleRun>,
+    /// Exclusive cumulative cell offset for each RLE run
+    run_ends: Vec<u64>,
     /// Total cell count (for validation)
     total_cells: u64,
 }
@@ -1141,12 +1155,15 @@ impl StyleRange {
         }
         push_style_run(&mut runs, 0, total_cells - cursor);
         runs.shrink_to_fit();
+        let run_ends = build_run_ends(&runs);
+        debug_assert_eq!(run_ends.last().copied(), Some(total_cells));
 
         StyleRange {
             start: (row_start, col_start),
             end: (row_end, col_end),
             palette: range_palette,
             runs,
+            run_ends,
             total_cells,
         }
     }
@@ -1255,17 +1272,12 @@ impl StyleRange {
         self.palette.get(style_id as usize)
     }
 
-    /// Get style ID at a linear index using binary search on runs
+    /// Get style ID at a linear index using binary search on run end offsets
     fn style_id_at(&self, linear_idx: u64) -> Option<u32> {
-        let mut offset = 0u64;
-        for run in &self.runs {
-            let run_end = offset + u64::from(run.count);
-            if linear_idx < run_end {
-                return Some(run.style_id);
-            }
-            offset = run_end;
-        }
-        None
+        let run_idx = self
+            .run_ends
+            .partition_point(|&run_end| run_end <= linear_idx);
+        self.runs.get(run_idx).map(|run| run.style_id)
     }
 
     /// Iterate over all cells with their positions and styles
@@ -1551,5 +1563,37 @@ mod tests {
         assert_eq!(range.get((0, 0)), Some(&idless));
         assert_eq!(range.get((0, 1)), Some(&real_id));
         assert_eq!(range.unique_style_count(), 2);
+    }
+
+    #[test]
+    fn test_style_range_random_access_across_many_run_boundaries() {
+        const CELL_COUNT: u32 = 4_096;
+
+        let even = Style::new().with_font(Font::new().with_name("Even".to_string()));
+        let odd = Style::new().with_font(Font::new().with_name("Odd".to_string()));
+        let cells = (0..CELL_COUNT)
+            .map(|column| (0, column, (column % 2) as usize))
+            .collect();
+        let range = StyleRange::from_style_ids(cells, vec![even.clone(), odd.clone()]);
+
+        assert_eq!(range.run_count(), CELL_COUNT as usize);
+        assert_eq!(range.run_ends.len(), range.run_count());
+        assert_eq!(range.run_ends.first(), Some(&1));
+        assert_eq!(range.run_ends.last(), Some(&u64::from(CELL_COUNT)));
+
+        for column in [0, 1, 2_047, 2_048, 4_094, 4_095] {
+            let expected = if column % 2 == 0 { &even } else { &odd };
+            assert_eq!(range.get((0, column)), Some(expected));
+        }
+        for (row, column, iterated_style) in range.cells() {
+            assert_eq!(range.get((row, column)), Some(iterated_style));
+        }
+
+        assert_eq!(range.style_id_at(0), Some(1));
+        assert_eq!(range.style_id_at(1), Some(2));
+        assert_eq!(range.style_id_at(u64::from(CELL_COUNT - 1)), Some(2));
+        assert_eq!(range.style_id_at(u64::from(CELL_COUNT)), None);
+        assert_eq!(range.get((0, CELL_COUNT as usize)), None);
+        assert_eq!(StyleRange::empty().style_id_at(0), None);
     }
 }

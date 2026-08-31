@@ -5447,6 +5447,40 @@ mod tests {
     }
 
     #[test]
+    fn test_omitted_cell_style_uses_xf_zero_for_value_conversion_only() {
+        let sheet_xml = br#"<worksheet>
+  <sheetData><row r="1"><c r="A1"><v>2</v></c></row></sheetData>
+</worksheet>"#;
+        let style_zero = Style::new().with_font(Font::new().with_name("default-xf".to_string()));
+
+        let mut streaming_workbook = workbook_with_sheet(
+            sheet_xml,
+            vec![style_zero.clone()],
+            vec![CellFormat::DateTime],
+        );
+        let cell = streaming_workbook
+            .worksheet_cells_reader("Sheet1")
+            .unwrap()
+            .next_cell()
+            .unwrap()
+            .unwrap();
+        assert_eq!(cell.get_style().unwrap().style_id, Some(0));
+        assert!(matches!(cell.get_value(), DataRef::DateTime(_)));
+
+        let mut range_workbook = workbook_with_sheet(
+            sheet_xml,
+            vec![style_zero.clone()],
+            vec![CellFormat::DateTime],
+        );
+        let range = range_workbook.worksheet_range_ref("Sheet1").unwrap();
+        assert!(matches!(range.get((0, 0)), Some(DataRef::DateTime(_))));
+
+        let mut style_workbook =
+            workbook_with_sheet(sheet_xml, vec![style_zero], vec![CellFormat::DateTime]);
+        assert!(style_workbook.worksheet_style("Sheet1").unwrap().is_empty());
+    }
+
+    #[test]
     fn test_layout_boolean_lexical_forms_and_malformed_values() {
         let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">

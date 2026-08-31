@@ -319,35 +319,6 @@ pub(super) fn parse_color(
     Ok(color.map(|color| tint.map_or(color, |tint| apply_tint(color, tint))))
 }
 
-/// Parse font weight from string
-fn parse_font_weight(s: &str) -> FontWeight {
-    match s {
-        "bold" | "700" => FontWeight::Bold,
-        "normal" | "400" => FontWeight::Normal,
-        _ => {
-            // Try to parse as numeric weight
-            if let Ok(weight) = s.parse::<u16>() {
-                if weight >= 600 {
-                    FontWeight::Bold
-                } else {
-                    FontWeight::Normal
-                }
-            } else {
-                FontWeight::Normal
-            }
-        }
-    }
-}
-
-/// Parse font style from string
-fn parse_font_style(s: &str) -> FontStyle {
-    match s {
-        "italic" | "oblique" => FontStyle::Italic,
-        "normal" => FontStyle::Normal,
-        _ => FontStyle::Normal,
-    }
-}
-
 /// Parse underline style from string
 fn parse_underline_style(s: &str) -> UnderlineStyle {
     match s {
@@ -498,30 +469,34 @@ pub fn parse_font<RS: BufRead>(
                     }
                 }
                 b"b" => {
-                    // Check if the element has a 'val' attribute
-                    let mut weight = FontWeight::Bold; // Default to bold
-                    for attr in e.attributes() {
-                        let attr = attr?;
-                        if attr.key.as_ref() == b"val" {
-                            let val_str = String::from_utf8_lossy(&attr.value);
-                            weight = parse_font_weight(&val_str);
+                    let mut bold = true;
+                    for attribute in e.attributes() {
+                        let attribute = attribute?;
+                        if attribute.key.as_ref() == b"val" {
+                            bold = parse_ooxml_bool(&attribute.value)?;
                             break;
                         }
                     }
-                    font = font.with_weight(weight);
+                    font = font.with_weight(if bold {
+                        FontWeight::Bold
+                    } else {
+                        FontWeight::Normal
+                    });
                 }
                 b"i" => {
-                    // Check if the element has a 'val' attribute
-                    let mut style = FontStyle::Italic; // Default to italic
-                    for attr in e.attributes() {
-                        let attr = attr?;
-                        if attr.key.as_ref() == b"val" {
-                            let val_str = String::from_utf8_lossy(&attr.value);
-                            style = parse_font_style(&val_str);
+                    let mut italic = true;
+                    for attribute in e.attributes() {
+                        let attribute = attribute?;
+                        if attribute.key.as_ref() == b"val" {
+                            italic = parse_ooxml_bool(&attribute.value)?;
                             break;
                         }
                     }
-                    font = font.with_style(style);
+                    font = font.with_style(if italic {
+                        FontStyle::Italic
+                    } else {
+                        FontStyle::Normal
+                    });
                 }
                 b"u" => {
                     // Check if the element has a 'val' attribute
@@ -537,7 +512,15 @@ pub fn parse_font<RS: BufRead>(
                     font = font.with_underline(underline_style);
                 }
                 b"strike" => {
-                    font = font.with_strikethrough(true);
+                    let mut strikethrough = true;
+                    for attribute in e.attributes() {
+                        let attribute = attribute?;
+                        if attribute.key.as_ref() == b"val" {
+                            strikethrough = parse_ooxml_bool(&attribute.value)?;
+                            break;
+                        }
+                    }
+                    font = font.with_strikethrough(strikethrough);
                 }
                 b"color" => {
                     if let Some(color) = parse_color(
@@ -802,9 +785,13 @@ pub fn parse_alignment<RS: BufRead>(
                 }
             }
             b"textRotation" => {
-                if let Ok(rotation) = String::from_utf8_lossy(&attr.value).parse::<u16>() {
-                    alignment = alignment.with_text_rotation(TextRotation::Degrees(rotation));
-                }
+                let rotation = String::from_utf8_lossy(&attr.value).parse::<u16>()?;
+                let rotation = match rotation {
+                    0..=180 => TextRotation::Degrees(rotation),
+                    255 => TextRotation::Stacked,
+                    _ => return Err(XlsxError::Unexpected("invalid text rotation")),
+                };
+                alignment = alignment.with_text_rotation(rotation);
             }
             b"indent" => {
                 if let Ok(indent) = String::from_utf8_lossy(&attr.value).parse::<u8>() {
@@ -829,22 +816,17 @@ pub fn parse_protection<RS: BufRead>(
     _xml: &mut Reader<RS>,
     start_elem: &BytesStart,
 ) -> Result<Protection, XlsxError> {
-    let mut protection = Protection::new();
+    // CT_CellProtection defaults `locked` to true and `hidden` to false.
+    let mut protection = Protection::new().with_locked(true);
 
     for attr in start_elem.attributes() {
         let attr = attr?;
         match attr.key.as_ref() {
             b"locked" => {
-                let locked_str = String::from_utf8_lossy(&attr.value);
-                if locked_str == "1" || locked_str == "true" {
-                    protection = protection.with_locked(true);
-                }
+                protection = protection.with_locked(parse_ooxml_bool(&attr.value)?);
             }
             b"hidden" => {
-                let hidden_str = String::from_utf8_lossy(&attr.value);
-                if hidden_str == "1" || hidden_str == "true" {
-                    protection = protection.with_hidden(true);
-                }
+                protection = protection.with_hidden(parse_ooxml_bool(&attr.value)?);
             }
             _ => {}
         }
@@ -934,6 +916,26 @@ mod tests {
         )
     }
 
+    fn parse_alignment_xml(source: &[u8]) -> Result<Alignment, XlsxError> {
+        let mut xml = Reader::from_reader(Cursor::new(source));
+        let mut buf = Vec::new();
+        let element = match xml.read_event_into(&mut buf).unwrap() {
+            Event::Start(element) | Event::Empty(element) => element.into_owned(),
+            event => panic!("expected alignment element, got {event:?}"),
+        };
+        parse_alignment(&mut xml, &element)
+    }
+
+    fn parse_protection_xml(source: &[u8]) -> Result<Protection, XlsxError> {
+        let mut xml = Reader::from_reader(Cursor::new(source));
+        let mut buf = Vec::new();
+        let element = match xml.read_event_into(&mut buf).unwrap() {
+            Event::Start(element) | Event::Empty(element) => element.into_owned(),
+            event => panic!("expected protection element, got {event:?}"),
+        };
+        parse_protection(&mut xml, &element)
+    }
+
     #[test]
     fn indexed_colors_use_zero_based_ooxml_offsets() {
         let indexed = &NO_INDEXED_COLOR_OVERRIDES;
@@ -996,6 +998,67 @@ mod tests {
     fn font_family_uses_val_attribute() {
         let font = parse_font_xml(br#"<font><family val="2"/></font>"#).unwrap();
         assert_eq!(font.family.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn font_emphasis_honors_ooxml_boolean_values() {
+        let font = parse_font_xml(br#"<font><b/><i/><strike/></font>"#).unwrap();
+        assert!(font.is_bold());
+        assert!(font.is_italic());
+        assert!(font.has_strikethrough());
+
+        for value in ["0", "false"] {
+            let source = format!(
+                r#"<font><b val="{value}"/><i val="{value}"/><strike val="{value}"/></font>"#
+            );
+            let font = parse_font_xml(source.as_bytes()).unwrap();
+            assert!(!font.is_bold());
+            assert!(!font.is_italic());
+            assert!(!font.has_strikethrough());
+        }
+
+        let font =
+            parse_font_xml(br#"<font><b val="true"/><i val="1"/><strike val="true"/></font>"#)
+                .unwrap();
+        assert!(font.is_bold());
+        assert!(font.is_italic());
+        assert!(font.has_strikethrough());
+
+        assert!(parse_font_xml(br#"<font><b val="sometimes"/></font>"#).is_err());
+        assert!(parse_font_xml(br#"<font><i val="sometimes"/></font>"#).is_err());
+        assert!(parse_font_xml(br#"<font><strike val="sometimes"/></font>"#).is_err());
+    }
+
+    #[test]
+    fn text_rotation_255_maps_to_stacked_text() {
+        assert_eq!(
+            parse_alignment_xml(br#"<alignment textRotation="255"/>"#)
+                .unwrap()
+                .text_rotation,
+            TextRotation::Stacked
+        );
+        assert_eq!(
+            parse_alignment_xml(br#"<alignment textRotation="180"/>"#)
+                .unwrap()
+                .text_rotation,
+            TextRotation::Degrees(180)
+        );
+        assert!(parse_alignment_xml(br#"<alignment textRotation="181"/>"#).is_err());
+        assert!(parse_alignment_xml(br#"<alignment textRotation="invalid"/>"#).is_err());
+    }
+
+    #[test]
+    fn protection_uses_ooxml_locked_default_and_boolean_values() {
+        let protection = parse_protection_xml(br#"<protection hidden="1"/>"#).unwrap();
+        assert!(protection.locked);
+        assert!(protection.hidden);
+
+        let protection =
+            parse_protection_xml(br#"<protection locked="false" hidden="0"/>"#).unwrap();
+        assert!(!protection.locked);
+        assert!(!protection.hidden);
+
+        assert!(parse_protection_xml(br#"<protection locked="sometimes"/>"#).is_err());
     }
 
     #[test]

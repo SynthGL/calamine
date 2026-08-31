@@ -1088,10 +1088,7 @@ impl StyleRange {
             let relative_row = u64::from(row - row_start);
             let relative_column = u64::from(column - col_start);
             let linear_index = relative_row * width + relative_column;
-            sparse_ids.insert(
-                linear_index,
-                style_id.min(u16::MAX as usize) as u16,
-            );
+            sparse_ids.insert(linear_index, style_id.min(u16::MAX as usize) as u16);
         }
 
         // Construct zero/style runs directly from sparse positions. Large gaps are
@@ -1126,8 +1123,7 @@ impl StyleRange {
         // Build the compact palette first, then let from_style_ids construct runs
         // without allocating the full worksheet bounding rectangle.
         let mut palette: Vec<Style> = vec![Style::default()];
-        let mut style_to_id: std::collections::HashMap<u32, u16> =
-            std::collections::HashMap::new();
+        let mut style_to_id: std::collections::HashMap<u32, u16> = std::collections::HashMap::new();
         let mut style_cells = Vec::with_capacity(cells.len());
 
         for (row, column, style) in cells {
@@ -1435,8 +1431,7 @@ mod tests {
 
     #[test]
     fn test_sparse_style_range_avoids_dense_extreme_bounds() {
-        let styled =
-            Style::new().with_font(Font::new().with_name("Endpoint".to_string()));
+        let styled = Style::new().with_font(Font::new().with_name("Endpoint".to_string()));
         let range = StyleRange::from_style_ids(
             vec![(0, 0, 1), (1_048_575, 16_383, 1)],
             vec![Style::default(), styled.clone()],

@@ -3023,27 +3023,6 @@ where
     Ok(merge_cells)
 }
 
-/// Advance the cell name by the offset
-///
-/// This function advances the cell name by the offset.
-///
-/// # Parameters
-///
-/// - `name`: The cell name to advance.
-/// - `offset`: The offset to advance the cell name by.
-///
-/// # Returns
-///
-/// A vector of bytes representing the advanced cell name.
-///
-pub fn offset_cell_name(name: &[u8], offset: (i64, i64)) -> Result<Vec<u8>, XlsxError> {
-    let reference = Reference::parse(name)?;
-    let offset_ref = reference.offset(offset)?;
-    let mut buf = Vec::new();
-    offset_ref.format(&mut buf)?;
-    Ok(buf)
-}
-
 #[derive(Debug, Copy, Clone)]
 enum Reference {
     Cell {

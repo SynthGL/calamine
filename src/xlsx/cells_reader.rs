@@ -13,7 +13,7 @@ use std::{
 };
 
 use super::{
-    get_attribute, get_dimension, get_row, get_row_column, read_string, Dimensions, XlReader,
+    get_attribute, get_dimension, get_row, get_row_column, read_rich_string, Dimensions, XlReader,
 };
 use crate::{
     datatype::DataRef,
@@ -112,6 +112,23 @@ where
     }
 
     pub fn next_cell(&mut self) -> Result<Option<Cell<DataRef<'a>>>, XlsxError> {
+        self.next_cell_with_style(true)
+    }
+
+    /// Read the next cell without cloning its style.
+    ///
+    /// Worksheet value ranges discard `Cell::style`, so their internal reader
+    /// path must not materialize a heap-backed `Style` for every cell. The
+    /// public streaming API continues to return styled cells through
+    /// [`Self::next_cell`].
+    pub(crate) fn next_cell_value_only(&mut self) -> Result<Option<Cell<DataRef<'a>>>, XlsxError> {
+        self.next_cell_with_style(false)
+    }
+
+    fn next_cell_with_style(
+        &mut self,
+        include_style: bool,
+    ) -> Result<Option<Cell<DataRef<'a>>>, XlsxError> {
         loop {
             self.buf.clear();
             match self.xml.read_event_into(&mut self.buf) {
@@ -138,19 +155,22 @@ where
                     let mut value = DataRef::Empty;
                     let mut style = None;
 
-                    // Extract style ID if present, default to 0 if not present
-                    let style_id = if let Ok(Some(style_id_str)) =
-                        get_attribute(c_element.attributes(), QName(b"s"))
-                    {
-                        atoi_simd::parse::<usize>(style_id_str).unwrap_or(0)
-                    } else {
-                        0 // Default to style ID 0 when not present
-                    };
+                    if include_style {
+                        // The public streaming API exposes the resolved style.
+                        // Value-only range construction bypasses this clone.
+                        let style_id = if let Ok(Some(style_id_str)) =
+                            get_attribute(c_element.attributes(), QName(b"s"))
+                        {
+                            atoi_simd::parse::<usize>(style_id_str).unwrap_or(0)
+                        } else {
+                            0
+                        };
 
-                    if style_id < self.styles.len() {
-                        let mut s = self.styles[style_id].clone();
-                        s.style_id = Some(style_id as u32);
-                        style = Some(s);
+                        if style_id < self.styles.len() {
+                            let mut resolved_style = self.styles[style_id].clone();
+                            resolved_style.style_id = Some(style_id as u32);
+                            style = Some(resolved_style);
+                        }
                     }
 
                     loop {
@@ -191,6 +211,18 @@ where
     }
 
     pub fn next_formula(&mut self) -> Result<Option<Cell<String>>, XlsxError> {
+        self.next_formula_with_style(true)
+    }
+
+    /// Read the next formula without cloning its style for range construction.
+    pub(crate) fn next_formula_value_only(&mut self) -> Result<Option<Cell<String>>, XlsxError> {
+        self.next_formula_with_style(false)
+    }
+
+    fn next_formula_with_style(
+        &mut self,
+        include_style: bool,
+    ) -> Result<Option<Cell<String>>, XlsxError> {
         loop {
             self.buf.clear();
             match self.xml.read_event_into(&mut self.buf) {
@@ -217,19 +249,20 @@ where
                     let mut value = None;
                     let mut style = None;
 
-                    // Extract style ID if present, default to 0 if not present
-                    let style_id = if let Ok(Some(style_id_str)) =
-                        get_attribute(c_element.attributes(), QName(b"s"))
-                    {
-                        atoi_simd::parse::<usize>(style_id_str).unwrap_or(0)
-                    } else {
-                        0 // Default to style ID 0 when not present
-                    };
+                    if include_style {
+                        let style_id = if let Ok(Some(style_id_str)) =
+                            get_attribute(c_element.attributes(), QName(b"s"))
+                        {
+                            atoi_simd::parse::<usize>(style_id_str).unwrap_or(0)
+                        } else {
+                            0
+                        };
 
-                    if style_id < self.styles.len() {
-                        let mut s = self.styles[style_id].clone();
-                        s.style_id = Some(style_id as u32);
-                        style = Some(s);
+                        if style_id < self.styles.len() {
+                            let mut resolved_style = self.styles[style_id].clone();
+                            resolved_style.style_id = Some(style_id as u32);
+                            style = Some(resolved_style);
+                        }
                     }
 
                     loop {
@@ -491,7 +524,17 @@ where
     Ok(match e.local_name().as_ref() {
         b"is" => {
             // inlineStr
-            read_string(xml, e.name())?.map_or(DataRef::Empty, DataRef::String)
+            match read_rich_string(xml, e.name())? {
+                Some(Data::String(value)) if value.is_empty() => DataRef::Empty,
+                Some(Data::String(value)) => DataRef::String(value),
+                Some(Data::RichText(value)) => DataRef::RichText(value),
+                Some(_) => {
+                    return Err(XlsxError::Unexpected(
+                        "inline string parser returned a non-string value",
+                    ))
+                }
+                None => DataRef::Empty,
+            }
         }
         b"v" => {
             // value

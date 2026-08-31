@@ -11,8 +11,9 @@ The package is published as `calamine-styles`, while its Rust library keeps the
 fork baseline is calamine 0.33; promotion is gated on rebasing the style delta
 onto the current upstream release and passing the full test matrix.
 
-The main addition is `StyleInfo`, returned by
-`worksheet_range_with_style()`:
+The main addition is [`Reader::worksheet_style()`], which returns an
+RLE-compressed [`StyleRange`] alongside the existing value-only worksheet
+range API:
 
 - Font: bold, italic, underline, strikethrough, size, color, and name
 - Fill: pattern type and foreground/background color
@@ -31,11 +32,18 @@ calamine = { package = "calamine-styles", version = "0.1", features = ["dates"] 
 use calamine::{open_workbook, Reader, Xlsx};
 
 let mut excel: Xlsx<_> = open_workbook("file.xlsx").unwrap();
-let range = excel.worksheet_range("Sheet1").unwrap();
-for row in range.rows() {
-    println!("{:?}", row);
+let values = excel.worksheet_range("Sheet1").unwrap();
+let styles = excel.worksheet_style("Sheet1").unwrap();
+
+println!("{} value rows", values.height());
+for (row, column, style) in styles.cells() {
+    println!("style at relative ({row}, {column}): {style:?}");
 }
 ```
+
+`StyleRange::get()` uses positions relative to the style range's start, just
+like `Range::get()`. For bulk inspection, `StyleRange::cells()` iterates the
+compressed range without cloning each `Style`.
 
 ## Features
 

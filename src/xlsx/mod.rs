@@ -350,7 +350,9 @@ impl<RS: Read + Seek> Xlsx<RS> {
                 Ok(Event::Start(e)) if e.local_name().as_ref() == b"numFmts" => loop {
                     inner_buf.clear();
                     match xml.read_event_into(&mut inner_buf) {
-                        Ok(Event::Start(e)) if e.local_name().as_ref() == b"numFmt" => {
+                        Ok(Event::Start(e) | Event::Empty(e))
+                            if e.local_name().as_ref() == b"numFmt" =>
+                        {
                             let mut id = Vec::new();
                             let mut format = None;
                             for a in e.attributes() {
@@ -1853,7 +1855,9 @@ impl<RS: Read + Seek> Xlsx<RS> {
         loop {
             buf.clear();
             match xml.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"sheetFormatPr" => {
+                Ok(Event::Start(ref e) | Event::Empty(ref e))
+                    if e.local_name().as_ref() == b"sheetFormatPr" =>
+                {
                     // Parse default column width and row height
                     for attr in e.attributes() {
                         let attr = attr.map_err(XlsxError::XmlAttr)?;
@@ -2657,8 +2661,8 @@ where
 /// Result of parsing run properties - includes both the font and whether there's "rich" formatting
 struct RunPropertiesResult {
     font: Font,
-    /// Whether the font has "rich" formatting (bold, italic, underline, strikethrough, color)
-    /// that would make this text run distinct from plain text
+    /// Whether the parsed font contains any property that makes this run
+    /// distinct from inherited plain text
     has_rich_formatting: bool,
 }
 
@@ -2747,7 +2751,7 @@ where
                         }
                     }
                     b"sz" => {
-                        // Font size - captured but doesn't count as "rich" formatting
+                        // Font size is run formatting even when no emphasis flag is set
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"val" {
                                 if let Ok(size) =
@@ -2769,7 +2773,7 @@ where
                         }
                     }
                     b"rFont" => {
-                        // Font name - captured but doesn't count as "rich" formatting
+                        // Font name is run formatting even when no emphasis flag is set
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"val" {
                                 font = font
@@ -2780,7 +2784,7 @@ where
                         }
                     }
                     b"family" => {
-                        // Font family - captured but doesn't count as "rich" formatting
+                        // Font family is run formatting even when no emphasis flag is set
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"val" {
                                 font = font
@@ -2932,7 +2936,7 @@ where
             Ok(Event::End(e)) if e.name() == closing => {
                 // End of string item
                 if is_rich_text && !runs.is_empty() {
-                    // Only return RichText if there's actual rich formatting (bold, italic, etc.)
+                    // Preserve RichText whenever any run carries explicit font properties.
                     if has_any_rich_formatting {
                         return Ok(Some(Data::RichText(RichText::from_runs(runs))));
                     } else {
@@ -2966,7 +2970,7 @@ where
 
                 if is_rich_text {
                     // Add as a run with optional formatting
-                    // Only include font if there's rich formatting (bold, italic, etc.)
+                    // Retain every explicit run-font property, including name and size.
                     let font = current_props
                         .take()
                         .filter(|p| p.has_rich_formatting)

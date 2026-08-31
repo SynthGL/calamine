@@ -15,6 +15,7 @@ categories = ["encoding", "parsing", "text-processing"]
 exclude = ["tests/**/*"]
 edition = "2021"
 rust-version = "1.83" # For quick-xml + encoding_rs.
+autobenches = false
 
 [lib]
 # Preserve calamine's public crate path even though the published package has

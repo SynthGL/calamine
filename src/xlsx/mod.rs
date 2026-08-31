@@ -47,6 +47,7 @@ pub const MAX_ROWS: u32 = 1_048_576;
 pub const MAX_COLUMNS: u32 = 16_384;
 
 const DEFAULT_COLUMN_WIDTH: f64 = 8.43;
+const DEFAULT_ROW_HEIGHT: f64 = 15.0;
 
 fn theme_slot(name: &[u8]) -> Option<usize> {
     match name {
@@ -2301,7 +2302,8 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                 if row_e.local_name().as_ref() == b"row" =>
                             {
                                 let mut row_num = next_implicit_row;
-                                let mut height = 0.0;
+                                let mut height = None;
+                                let mut has_explicit_height = false;
                                 let mut custom_height = false;
                                 let mut hidden = false;
                                 let mut thick_top = false;
@@ -2320,11 +2322,18 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                             )?;
                                         }
                                         b"ht" => {
+                                            // Preserve the historical fallback for a malformed
+                                            // height attribute while keeping an absent attribute
+                                            // distinct from an explicit height of zero.
+                                            height = Some(0.0);
                                             if let Ok(height_str) =
                                                 xml.decoder().decode(&attr.value)
                                             {
                                                 if let Ok(h) = height_str.parse::<f64>() {
-                                                    height = h;
+                                                    // Match the previous acceptance of positive
+                                                    // values while also retaining a valid zero.
+                                                    has_explicit_height = h >= 0.0;
+                                                    height = Some(h);
                                                 }
                                             }
                                         }
@@ -2357,8 +2366,11 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                     || hidden
                                     || thick_top
                                     || thick_bottom
-                                    || height > 0.0
+                                    || has_explicit_height
                                 {
+                                    let height = height.unwrap_or_else(|| {
+                                        layout.default_row_height.unwrap_or(DEFAULT_ROW_HEIGHT)
+                                    });
                                     let row_height = RowHeight::new(row_num, height)
                                         .with_custom_height(custom_height)
                                         .with_hidden(hidden)
@@ -5128,6 +5140,51 @@ mod tests {
         assert_eq!(layout.get_row_height(2).unwrap().height, 20.0);
         assert_eq!(layout.get_row_height(4).unwrap().height, 22.0);
         assert_eq!(layout.get_row_height(5).unwrap().height, 24.0);
+    }
+
+    #[test]
+    fn test_layout_metadata_only_rows_inherit_defaults_and_explicit_zero() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetFormatPr defaultRowHeight="17.5"/>
+  <sheetData>
+    <row hidden="1"/>
+    <row r="3" thickTop="1"/>
+    <row thickBot="1"/>
+    <row r="6" ht="0"/>
+    <row r="7" ht="invalid"/>
+    <row r="8" ht="invalid" customHeight="1"/>
+  </sheetData>
+</worksheet>"#;
+        let mut workbook = workbook_with_sheet(sheet_xml, Vec::new(), Vec::new());
+
+        let layout = workbook.worksheet_layout("Sheet1").unwrap();
+
+        let hidden_row = layout.get_row_height(0).unwrap();
+        assert_eq!(hidden_row.height, 17.5);
+        assert!(hidden_row.hidden);
+        assert!(layout.get_row_height(1).is_none());
+        let explicit_row = layout.get_row_height(2).unwrap();
+        assert_eq!(explicit_row.height, 17.5);
+        assert!(explicit_row.thick_top);
+        let implicit_row_after_explicit = layout.get_row_height(3).unwrap();
+        assert_eq!(implicit_row_after_explicit.height, 17.5);
+        assert!(implicit_row_after_explicit.thick_bottom);
+        assert_eq!(layout.get_row_height(5).unwrap().height, 0.0);
+        assert!(layout.get_row_height(6).is_none());
+        assert_eq!(layout.get_row_height(7).unwrap().height, 0.0);
+
+        let library_default_xml = br#"<worksheet>
+  <sheetData><row r="2" hidden="1"/></sheetData>
+</worksheet>"#;
+        let mut library_default_workbook =
+            workbook_with_sheet(library_default_xml, Vec::new(), Vec::new());
+
+        let library_default_layout = library_default_workbook.worksheet_layout("Sheet1").unwrap();
+        assert_eq!(
+            library_default_layout.get_row_height(1).unwrap().height,
+            DEFAULT_ROW_HEIGHT
+        );
     }
 
     #[test]

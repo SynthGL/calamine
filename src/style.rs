@@ -602,7 +602,12 @@ impl Fill {
 /// Number format
 #[derive(Debug, Clone, PartialEq)]
 pub struct NumberFormat {
-    /// Format code
+    /// Format code.
+    ///
+    /// This is empty when a workbook references a locale-reserved or unknown
+    /// built-in format ID. In that case, [`Self::format_id`] still preserves
+    /// the source identifier; an empty code must not be interpreted as
+    /// `General`.
     pub format_code: String,
     /// Format ID
     pub format_id: Option<u32>,

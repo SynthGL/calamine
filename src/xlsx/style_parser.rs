@@ -391,6 +391,8 @@ fn parse_border_style(s: &str) -> BorderStyle {
         "dashed" => BorderStyle::Dashed,
         "dotted" => BorderStyle::Dotted,
         "mediumDashed" => BorderStyle::MediumDashed,
+        "mediumDashDot" => BorderStyle::MediumDashDot,
+        "mediumDashDotDot" => BorderStyle::MediumDashDotDot,
         "dashDot" => BorderStyle::DashDot,
         "dashDotDot" => BorderStyle::DashDotDot,
         "slantDashDot" => BorderStyle::SlantDashDot,
@@ -1060,6 +1062,17 @@ mod tests {
         assert!(!protection.hidden);
 
         assert!(parse_protection_xml(br#"<protection locked="sometimes"/>"#).is_err());
+    }
+
+    #[test]
+    fn medium_dash_dot_border_variants_are_preserved() {
+        let borders = parse_border_xml(
+            br#"<border><left style="mediumDashDot"/><right style="mediumDashDotDot"/></border>"#,
+        )
+        .unwrap();
+
+        assert_eq!(borders.left.style, BorderStyle::MediumDashDot);
+        assert_eq!(borders.right.style, BorderStyle::MediumDashDotDot);
     }
 
     #[test]

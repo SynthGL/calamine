@@ -91,6 +91,10 @@ pub enum BorderStyle {
     Dotted,
     /// Medium dashed border
     MediumDashed,
+    /// Medium dash dot border
+    MediumDashDot,
+    /// Medium dash dot dot border
+    MediumDashDotDot,
     /// Dash dot border
     DashDot,
     /// Dash dot dot border

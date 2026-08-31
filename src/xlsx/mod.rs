@@ -235,6 +235,174 @@ fn compact_worksheet_style_palette(
     worksheet_palette
 }
 
+fn parse_xf_record<R: std::io::BufRead>(
+    xml: &mut XmlReader<R>,
+    start: &BytesStart<'_>,
+    number_formats: &BTreeMap<Vec<u8>, (String, String)>,
+    fonts: &[Font],
+    fills: &[crate::Fill],
+    borders: &[crate::Borders],
+    base_xfs: (&[Style], &[CellFormat]),
+) -> Result<(Style, CellFormat), XlsxError> {
+    let mut base_style_id = None;
+    let mut num_fmt_id_bytes: Option<Vec<u8>> = None;
+    let mut font_id = None;
+    let mut fill_id = None;
+    let mut border_id = None;
+    // Preserve this branch's historical behavior when an apply flag is
+    // omitted, but honor an explicit false value by retaining the base XF.
+    let mut apply_font = true;
+    let mut apply_fill = true;
+    let mut apply_border = true;
+    let mut apply_number_format = true;
+    let mut apply_alignment = true;
+    let mut apply_protection = true;
+
+    for attribute in start.attributes() {
+        let attribute = attribute?;
+        match attribute.key.as_ref() {
+            b"xfId" => {
+                base_style_id = xml
+                    .decoder()
+                    .decode(&attribute.value)?
+                    .parse::<usize>()
+                    .ok();
+            }
+            b"fontId" => {
+                font_id = xml
+                    .decoder()
+                    .decode(&attribute.value)?
+                    .parse::<usize>()
+                    .ok();
+            }
+            b"fillId" => {
+                fill_id = xml
+                    .decoder()
+                    .decode(&attribute.value)?
+                    .parse::<usize>()
+                    .ok();
+            }
+            b"borderId" => {
+                border_id = xml
+                    .decoder()
+                    .decode(&attribute.value)?
+                    .parse::<usize>()
+                    .ok();
+            }
+            b"numFmtId" => num_fmt_id_bytes = Some(attribute.value.to_vec()),
+            b"applyFont" => {
+                apply_font = style_parser::parse_ooxml_bool(&attribute.value)?;
+            }
+            b"applyFill" => {
+                apply_fill = style_parser::parse_ooxml_bool(&attribute.value)?;
+            }
+            b"applyBorder" => {
+                apply_border = style_parser::parse_ooxml_bool(&attribute.value)?;
+            }
+            b"applyNumberFormat" => {
+                apply_number_format = style_parser::parse_ooxml_bool(&attribute.value)?;
+            }
+            b"applyAlignment" => {
+                apply_alignment = style_parser::parse_ooxml_bool(&attribute.value)?;
+            }
+            b"applyProtection" => {
+                apply_protection = style_parser::parse_ooxml_bool(&attribute.value)?;
+            }
+            _ => {}
+        }
+    }
+
+    let mut style = base_style_id
+        .and_then(|style_id| base_xfs.0.get(style_id))
+        .cloned()
+        .unwrap_or_default();
+    let mut cell_format = base_style_id
+        .and_then(|style_id| base_xfs.1.get(style_id))
+        .copied()
+        .unwrap_or(CellFormat::Other);
+
+    if apply_font {
+        if let Some(font) = font_id.and_then(|id| fonts.get(id)) {
+            style = style.with_font(font.clone());
+        }
+    }
+    if apply_fill {
+        if let Some(fill) = fill_id.and_then(|id| fills.get(id)) {
+            style = style.with_fill(fill.clone());
+        }
+    }
+    if apply_border {
+        if let Some(border) = border_id.and_then(|id| borders.get(id)) {
+            style = style.with_borders(border.clone());
+        }
+    }
+
+    if apply_number_format {
+        if let Some(id_bytes) = num_fmt_id_bytes.as_ref() {
+            if let Ok(num_fmt_id) = xml.decoder().decode(id_bytes)?.parse::<u32>() {
+                let format_code = match number_formats.get(id_bytes) {
+                    Some((_, exposed)) => exposed.clone(),
+                    None => builtin_number_format_code(num_fmt_id)
+                        .unwrap_or_default()
+                        .to_string(),
+                };
+                style = style.with_number_format(
+                    crate::style::NumberFormat::new(format_code).with_id(num_fmt_id),
+                );
+                cell_format = match number_formats.get(id_bytes) {
+                    Some((raw, _)) => detect_custom_number_format(raw),
+                    None => builtin_format_by_id(id_bytes),
+                };
+            }
+        }
+    }
+
+    let mut nested_buf = Vec::with_capacity(512);
+    loop {
+        nested_buf.clear();
+        match xml.read_event_into(&mut nested_buf) {
+            Ok(Event::Start(ref nested)) => match nested.local_name().as_ref() {
+                b"alignment" => {
+                    let alignment = style_parser::parse_alignment(xml, nested)?;
+                    if apply_alignment {
+                        style = style.with_alignment(alignment);
+                    }
+                }
+                b"protection" => {
+                    let protection = style_parser::parse_protection(xml, nested)?;
+                    if apply_protection {
+                        style = style.with_protection(protection);
+                    }
+                }
+                _ => {
+                    xml.read_to_end_into(nested.name(), &mut Vec::new())?;
+                }
+            },
+            Ok(Event::Empty(ref nested)) => match nested.local_name().as_ref() {
+                b"alignment" => {
+                    let alignment = style_parser::parse_alignment(xml, nested)?;
+                    if apply_alignment {
+                        style = style.with_alignment(alignment);
+                    }
+                }
+                b"protection" => {
+                    let protection = style_parser::parse_protection(xml, nested)?;
+                    if apply_protection {
+                        style = style.with_protection(protection);
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::End(ref end)) if end.local_name().as_ref() == b"xf" => break,
+            Ok(Event::Eof) => return Err(XlsxError::XmlEof("xf")),
+            Err(error) => return Err(XlsxError::Xml(error)),
+            _ => {}
+        }
+    }
+
+    Ok((style, cell_format))
+}
+
 /// An enum for Xlsx specific errors.
 #[derive(Debug)]
 pub enum XlsxError {
@@ -624,6 +792,8 @@ impl<RS: Read + Seek> Xlsx<RS> {
         let mut fonts = Vec::new();
         let mut fills = Vec::new();
         let mut borders = Vec::new();
+        let mut cell_style_xfs = Vec::new();
+        let mut cell_style_formats = Vec::new();
 
         let mut buf = Vec::with_capacity(1024);
         let mut inner_buf = Vec::with_capacity(1024);
@@ -722,12 +892,46 @@ impl<RS: Read + Seek> Xlsx<RS> {
                         _ => (),
                     }
                 },
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"cellStyleXfs" => loop {
+                    inner_buf.clear();
+                    match xml.read_event_into(&mut inner_buf) {
+                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"xf" => {
+                            let (style, format) = parse_xf_record(
+                                &mut xml,
+                                e,
+                                &number_formats,
+                                &fonts,
+                                &fills,
+                                &borders,
+                                (&[], &[]),
+                            )?;
+                            cell_style_xfs.push(style);
+                            cell_style_formats.push(format);
+                        }
+                        Ok(Event::End(ref e)) if e.local_name().as_ref() == b"cellStyleXfs" => {
+                            break
+                        }
+                        Ok(Event::Eof) => return Err(XlsxError::XmlEof("cellStyleXfs")),
+                        Err(e) => return Err(XlsxError::Xml(e)),
+                        _ => (),
+                    }
+                },
                 Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"cellXfs" => loop {
                     inner_buf.clear();
                     match xml.read_event_into(&mut inner_buf) {
                         Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"xf" => {
-                            // Parse the style by building it from referenced components
-                            let mut style = Style::new();
+                            // Start from the referenced named-style XF. Explicitly
+                            // disabled cell-XF components retain this base value.
+                            let base_style_id = get_attribute(e.attributes(), QName(b"xfId"))?
+                                .and_then(|value| atoi_simd::parse::<usize>(value).ok());
+                            let mut style = base_style_id
+                                .and_then(|style_id| cell_style_xfs.get(style_id))
+                                .cloned()
+                                .unwrap_or_default();
+                            let mut cell_format = base_style_id
+                                .and_then(|style_id| cell_style_formats.get(style_id))
+                                .copied()
+                                .unwrap_or(CellFormat::Other);
                             let mut num_fmt_id_bytes: Option<Vec<u8>> = None;
                             let mut font_id = None;
                             let mut fill_id = None;
@@ -805,6 +1009,10 @@ impl<RS: Read + Seek> Xlsx<RS> {
                             let num_fmt_id_bytes =
                                 apply_number_format.then_some(num_fmt_id_bytes).flatten();
                             if let Some(id_bytes) = num_fmt_id_bytes.as_ref() {
+                                cell_format = match number_formats.get(id_bytes) {
+                                    Some((raw, _)) => detect_custom_number_format(raw),
+                                    None => builtin_format_by_id(id_bytes),
+                                };
                                 if let Ok(num_fmt_id) =
                                     xml.decoder().decode(id_bytes)?.parse::<u32>()
                                 {
@@ -862,15 +1070,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                             }
 
                             self.styles.push(style);
-
-                            // Also add format for backward compatibility
-                            self.formats.push(num_fmt_id_bytes.map_or(
-                                CellFormat::Other,
-                                |id_bytes| match number_formats.get(&id_bytes) {
-                                    Some((raw, _)) => detect_custom_number_format(raw),
-                                    None => builtin_format_by_id(&id_bytes),
-                                },
-                            ));
+                            self.formats.push(cell_format);
                         }
                         Ok(Event::End(e)) if e.local_name().as_ref() == b"cellXfs" => break,
                         Ok(Event::Eof) => return Err(XlsxError::XmlEof("cellXfs")),
@@ -4659,6 +4859,121 @@ mod tests {
     }
 
     #[test]
+    fn test_cell_xfs_inherit_base_style_xfs_before_applying_overrides() {
+        let styles_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts>
+  <fonts count="2">
+    <font><name val="Base Font"/></font>
+    <font><name val="Override Font"/></font>
+  </fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill>
+  </fills>
+  <borders count="2"><border/><border><left style="thin"/></border></borders>
+  <cellStyleXfs count="1">
+    <xf numFmtId="164" fontId="0" fillId="1" borderId="1">
+      <alignment horizontal="center"/>
+      <protection hidden="1"/>
+    </xf>
+  </cellStyleXfs>
+  <cellXfs count="2">
+    <xf xfId="0" numFmtId="0" fontId="1" fillId="0" borderId="0"
+        applyNumberFormat="0" applyFont="0" applyFill="0" applyBorder="0"
+        applyAlignment="0" applyProtection="0">
+      <alignment horizontal="left"/>
+      <protection locked="0" hidden="0"/>
+    </xf>
+    <xf xfId="0" numFmtId="0" fontId="1" fillId="0" borderId="0"
+        applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1"
+        applyAlignment="1" applyProtection="1">
+      <alignment horizontal="left"/>
+      <protection locked="0" hidden="0"/>
+    </xf>
+  </cellXfs>
+</styleSheet>"#;
+        let cursor = Cursor::new(Vec::new());
+        let mut zip_writer = ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip_writer.start_file("xl/styles.xml", options).unwrap();
+        zip_writer.write_all(styles_xml).unwrap();
+        let mut cursor = zip_writer.finish().unwrap();
+        cursor.set_position(0);
+
+        let mut workbook = Xlsx {
+            zip: ZipArchive::new(cursor).unwrap(),
+            strings: Vec::new(),
+            sheets: Vec::new(),
+            tables: None,
+            formats: Vec::new(),
+            styles: Vec::new(),
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
+            is_1904: false,
+            metadata: Metadata::default(),
+            #[cfg(feature = "picture")]
+            pictures: None,
+            merged_regions: None,
+            options: XlsxOptions::default(),
+        };
+
+        workbook.read_styles().unwrap();
+        assert_eq!(workbook.styles.len(), 2);
+
+        let inherited = &workbook.styles[0];
+        assert_eq!(
+            inherited.font.as_ref().unwrap().name.as_deref(),
+            Some("Base Font")
+        );
+        assert_eq!(
+            inherited.fill.as_ref().unwrap().foreground_color,
+            Some(crate::Color::rgb(255, 0, 0))
+        );
+        assert_eq!(
+            inherited.borders.as_ref().unwrap().left.style,
+            crate::BorderStyle::Thin
+        );
+        assert_eq!(
+            inherited.number_format.as_ref().unwrap().format_id,
+            Some(164)
+        );
+        assert_eq!(
+            inherited.alignment.as_ref().unwrap().horizontal,
+            crate::HorizontalAlignment::Center
+        );
+        assert!(inherited.protection.as_ref().unwrap().locked);
+        assert!(inherited.protection.as_ref().unwrap().hidden);
+        assert_eq!(workbook.formats[0], CellFormat::DateTime);
+
+        let overridden = &workbook.styles[1];
+        assert_eq!(
+            overridden.font.as_ref().unwrap().name.as_deref(),
+            Some("Override Font")
+        );
+        assert_eq!(
+            overridden.fill.as_ref().unwrap().pattern,
+            crate::FillPattern::None
+        );
+        assert_eq!(
+            overridden.borders.as_ref().unwrap().left.style,
+            crate::BorderStyle::None
+        );
+        assert_eq!(
+            overridden.number_format.as_ref().unwrap().format_id,
+            Some(0)
+        );
+        assert_eq!(
+            overridden.alignment.as_ref().unwrap().horizontal,
+            crate::HorizontalAlignment::Left
+        );
+        assert!(!overridden.protection.as_ref().unwrap().locked);
+        assert!(!overridden.protection.as_ref().unwrap().hidden);
+        assert_eq!(workbook.formats[1], CellFormat::Other);
+    }
+
+    #[test]
     fn test_custom_theme_colors_feed_style_and_rich_text_parsers() {
         let theme_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
 <a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
@@ -5055,6 +5370,80 @@ mod tests {
                 .as_deref(),
             Some("cell-xf-zero")
         );
+    }
+
+    #[test]
+    fn test_cells_inherit_row_and_column_styles_with_correct_precedence() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <cols><col min="1" max="2" style="1"/></cols>
+  <sheetData>
+    <row r="1" s="2" customFormat="1">
+      <c r="A1"><v>1</v></c>
+      <c r="B1" s="3"><v>2</v></c>
+      <c r="C1"><v>3</v></c>
+      <c r="D1" s="0"><v>4</v></c>
+    </row>
+    <row>
+      <c r="A2"><v>5</v></c>
+      <c r="B2"><v>6</v></c>
+      <c r="C2"><v>7</v></c>
+    </row>
+    <row s="2" customFormat="0">
+      <c r="A3"><v>8</v></c>
+      <c r="C3"><v>9</v></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+        let named_style =
+            |name: &str| Style::new().with_font(Font::new().with_name(name.to_string()));
+        let workbook_styles = vec![
+            named_style("cell-zero"),
+            named_style("column"),
+            named_style("row"),
+            named_style("cell"),
+        ];
+        let formats = vec![
+            CellFormat::Other,
+            CellFormat::DateTime,
+            CellFormat::DateTime,
+            CellFormat::Other,
+        ];
+        let mut workbook = workbook_with_sheet(sheet_xml, workbook_styles.clone(), formats.clone());
+
+        let styles = workbook.worksheet_style("Sheet1").unwrap();
+        let font_name = |row, column| {
+            styles
+                .get((row, column))
+                .and_then(Style::get_font)
+                .and_then(|font| font.name.as_deref())
+        };
+        assert_eq!(font_name(0, 0), Some("row"));
+        assert_eq!(font_name(0, 1), Some("cell"));
+        assert_eq!(font_name(0, 2), Some("row"));
+        assert_eq!(font_name(0, 3), Some("cell-zero"));
+        assert_eq!(font_name(1, 0), Some("column"));
+        assert_eq!(font_name(1, 1), Some("column"));
+        assert!(styles.get((1, 2)).unwrap().is_empty());
+        assert_eq!(font_name(2, 0), Some("column"));
+        assert!(styles.get((2, 2)).unwrap().is_empty());
+
+        let mut streaming_workbook =
+            workbook_with_sheet(sheet_xml, workbook_styles, formats.clone());
+        let first = streaming_workbook
+            .worksheet_cells_reader("Sheet1")
+            .unwrap()
+            .next_cell()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.get_style().unwrap().style_id, Some(2));
+        assert!(matches!(first.get_value(), DataRef::DateTime(_)));
+
+        let mut range_workbook = workbook_with_sheet(sheet_xml, Vec::new(), formats);
+        range_workbook.styles = vec![Style::default(); 4];
+        let range = range_workbook.worksheet_range_ref("Sheet1").unwrap();
+        assert!(matches!(range.get((0, 0)), Some(DataRef::DateTime(_))));
+        assert!(matches!(range.get((1, 0)), Some(DataRef::DateTime(_))));
     }
 
     #[test]

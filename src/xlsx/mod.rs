@@ -46,6 +46,32 @@ pub const MAX_ROWS: u32 = 1_048_576;
 /// Maximum number of columns allowed in an XLSX file.
 pub const MAX_COLUMNS: u32 = 16_384;
 
+fn normalize_number_format_code(format_code: &str) -> String {
+    let mut normalized = String::new();
+    let mut chars = format_code.chars();
+    while let Some(character) = chars.next() {
+        if character == '\\' {
+            // The public style model exposes the displayed literal, but callers
+            // that classify values must retain and inspect the original escapes.
+            normalized.push(chars.next().unwrap_or(character));
+        } else {
+            normalized.push(character);
+        }
+    }
+    normalized
+}
+
+fn worksheet_column_span(
+    min_column: u32,
+    max_column: Option<u32>,
+) -> Result<std::ops::RangeInclusive<u32>, XlsxError> {
+    let max_column = max_column.unwrap_or(min_column);
+    if min_column == 0 || max_column < min_column || max_column > MAX_COLUMNS {
+        return Err(XlsxError::Unexpected("invalid worksheet column bounds"));
+    }
+    Ok((min_column - 1)..=(max_column - 1))
+}
+
 /// An enum for Xlsx specific errors.
 #[derive(Debug)]
 pub enum XlsxError {
@@ -326,7 +352,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                     match xml.read_event_into(&mut inner_buf) {
                         Ok(Event::Start(e)) if e.local_name().as_ref() == b"numFmt" => {
                             let mut id = Vec::new();
-                            let mut format = String::new();
+                            let mut format = None;
                             for a in e.attributes() {
                                 let a = a?;
                                 match a {
@@ -338,32 +364,16 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                         key: QName(b"formatCode"),
                                         ..
                                     } => {
-                                        let format_code = a
+                                        let raw = a
                                             .decode_and_unescape_value(xml.decoder())?
                                             .into_owned();
-                                        // Excel format codes use backslashes to escape special characters
-                                        // Remove escape backslashes (backslash followed by any character becomes just the character)
-                                        let mut unescaped = String::new();
-                                        let mut chars = format_code.chars().peekable();
-                                        while let Some(ch) = chars.next() {
-                                            if ch == '\\' {
-                                                // If there's a next character, use it without the backslash
-                                                if let Some(next_ch) = chars.next() {
-                                                    unescaped.push(next_ch);
-                                                } else {
-                                                    // Trailing backslash, keep it
-                                                    unescaped.push(ch);
-                                                }
-                                            } else {
-                                                unescaped.push(ch);
-                                            }
-                                        }
-                                        format = unescaped;
+                                        let exposed = normalize_number_format_code(&raw);
+                                        format = Some((raw, exposed));
                                     }
                                     _ => (),
                                 }
                             }
-                            if !format.is_empty() {
+                            if let Some(format) = format {
                                 number_formats.insert(id, format);
                             }
                         }
@@ -463,7 +473,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                             let format_code = match number_formats
                                                 .get(&fmt_id_bytes)
                                             {
-                                                Some(fmt) => fmt.clone(),
+                                                Some((_, exposed)) => exposed.clone(),
                                                 None => {
                                                     // Use built-in format
                                                     match num_fmt_id {
@@ -555,7 +565,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                             self.formats.push(num_fmt_id_bytes.map_or(
                                 CellFormat::Other,
                                 |id_bytes| match number_formats.get(&id_bytes) {
-                                    Some(fmt) => detect_custom_number_format(fmt),
+                                    Some((raw, _)) => detect_custom_number_format(raw),
                                     None => builtin_format_by_id(&id_bytes),
                                 },
                             ));
@@ -1871,10 +1881,11 @@ impl<RS: Read + Seek> Xlsx<RS> {
                     loop {
                         buf.clear();
                         match xml.read_event_into(&mut buf) {
-                            Ok(Event::Start(ref col_e))
+                            Ok(Event::Start(ref col_e) | Event::Empty(ref col_e))
                                 if col_e.local_name().as_ref() == b"col" =>
                             {
-                                let mut col_info = None;
+                                let mut min_column = None;
+                                let mut max_column = None;
                                 let mut width = 0.0;
                                 let mut custom_width = false;
                                 let mut hidden = false;
@@ -1884,11 +1895,13 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                     let attr = attr.map_err(XlsxError::XmlAttr)?;
                                     match attr.key.as_ref() {
                                         b"min" => {
-                                            if let Ok(min_str) = xml.decoder().decode(&attr.value) {
-                                                if let Ok(min_col) = min_str.parse::<u32>() {
-                                                    col_info = Some(min_col - 1);
-                                                    // Convert to 0-based
-                                                }
+                                            if let Ok(value) = xml.decoder().decode(&attr.value) {
+                                                min_column = value.parse::<u32>().ok();
+                                            }
+                                        }
+                                        b"max" => {
+                                            if let Ok(value) = xml.decoder().decode(&attr.value) {
+                                                max_column = value.parse::<u32>().ok();
                                             }
                                         }
                                         b"width" => {
@@ -1912,12 +1925,16 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                     }
                                 }
 
-                                if let Some(col) = col_info {
-                                    let column_width = ColumnWidth::new(col, width)
-                                        .with_custom_width(custom_width)
-                                        .with_hidden(hidden)
-                                        .with_best_fit(best_fit);
-                                    layout = layout.add_column_width(column_width);
+                                if let Some(min_column) = min_column {
+                                    for column in
+                                        worksheet_column_span(min_column, max_column)?
+                                    {
+                                        let column_width = ColumnWidth::new(column, width)
+                                            .with_custom_width(custom_width)
+                                            .with_hidden(hidden)
+                                            .with_best_fit(best_fit);
+                                        layout = layout.add_column_width(column_width);
+                                    }
                                 }
                             }
                             Ok(Event::End(ref end_e)) if end_e.local_name().as_ref() == b"cols" => {
@@ -2738,6 +2755,7 @@ where
                                 {
                                     font = font.with_size(size);
                                     has_any_props = true;
+                                    has_rich_formatting = true;
                                 }
                             }
                         }
@@ -2757,6 +2775,7 @@ where
                                 font = font
                                     .with_name(String::from_utf8_lossy(&attr.value).to_string());
                                 has_any_props = true;
+                                has_rich_formatting = true;
                             }
                         }
                     }
@@ -2767,6 +2786,7 @@ where
                                 font = font
                                     .with_family(String::from_utf8_lossy(&attr.value).to_string());
                                 has_any_props = true;
+                                has_rich_formatting = true;
                             }
                         }
                     }
@@ -4444,6 +4464,28 @@ mod tests {
     }
 
     #[test]
+    fn test_number_format_keeps_raw_escapes_for_type_detection() {
+        let raw = r"\Y000000";
+        assert_eq!(normalize_number_format_code(raw), "Y000000");
+        assert_eq!(detect_custom_number_format(raw), CellFormat::Other);
+        assert_eq!(
+            detect_custom_number_format(&normalize_number_format_code(raw)),
+            CellFormat::DateTime
+        );
+    }
+
+    #[test]
+    fn test_grouped_column_span_is_inclusive_and_bounded() {
+        assert_eq!(
+            worksheet_column_span(2, Some(5)).unwrap().collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert!(worksheet_column_span(0, Some(1)).is_err());
+        assert!(worksheet_column_span(5, Some(4)).is_err());
+        assert!(worksheet_column_span(1, Some(MAX_COLUMNS + 1)).is_err());
+    }
+
+    #[test]
     fn test_read_shared_strings_with_namespaced_si_name() {
         let shared_strings_data = br#"<?xml version="1.0" encoding="utf-8"?>
 <x:sst count="1187" uniqueCount="1187" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -4495,7 +4537,13 @@ mod tests {
         assert!(xlsx.read_shared_strings().is_ok());
         assert_eq!(3, xlsx.strings.len());
         assert_eq!(Data::String("String 1".to_string()), xlsx.strings[0]);
-        assert_eq!(Data::String("String 2".to_string()), xlsx.strings[1]);
+        match &xlsx.strings[1] {
+            Data::RichText(rich_text) => {
+                assert_eq!(rich_text.plain_text(), "String 2");
+                assert_eq!(rich_text.runs[0].font.as_ref().unwrap().size, Some(11.0));
+            }
+            value => panic!("font-only rich text was collapsed: {value:?}"),
+        }
         assert_eq!(Data::String("String 3".to_string()), xlsx.strings[2]);
     }
 }

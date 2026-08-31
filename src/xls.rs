@@ -737,11 +737,9 @@ fn parse_mul_rk(
         });
     }
 
-    let mut col = col_first as u32;
-
-    for rk in r[4..r.len() - 2].chunks(6) {
+    for (offset, rk) in r[4..r.len() - 2].chunks(6).enumerate() {
+        let col = col_first as u32 + offset as u32;
         cells.push(Cell::new((row as u32, col), rk_num(rk, formats, is_1904)));
-        col += 1;
     }
     Ok(())
 }

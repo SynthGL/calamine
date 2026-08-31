@@ -2770,7 +2770,7 @@ fn test_problematic_formats() {
     let range = xlsx.worksheet_range("Sheet1").unwrap();
     let styles = xlsx.worksheet_style("Sheet1").unwrap();
 
-    // Check cell A1 (0,0) - theme slot 0 is dk1 (black)
+    // Check cell A1 (0,0) - theme slot 0 is lt1 (white)
     let a1_style = styles
         .get((0, 0))
         .expect("A1 should have style information");
@@ -2781,11 +2781,11 @@ fn test_problematic_formats() {
     // Optional font name and size fields may legitimately be absent. Reaching this
     // point verifies that the style and font records were parsed successfully.
 
-    // Check font color - should resolve the workbook's dk1 theme slot
+    // Check font color - should resolve the workbook's lt1 theme slot
     if let Some(color) = a1_font.color {
         assert!(
-            color.is_black(),
-            "A1 font color should be black, got RGB({}, {}, {})",
+            color.is_white(),
+            "A1 font color should be white, got RGB({}, {}, {})",
             color.red,
             color.green,
             color.blue

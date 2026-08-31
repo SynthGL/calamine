@@ -13,15 +13,9 @@ use crate::style::*;
 use crate::utils::unescape_entity_to_buffer;
 use crate::XlsxError;
 
-/// Default Office theme in SpreadsheetML's zero-based slot order: `dk1`,
-/// `lt1`, `dk2`, `lt2`, six accents, hyperlink, and followed hyperlink.
+/// Default Office theme in SpreadsheetML's effective zero-based index order:
+/// `lt1`, `dk1`, `lt2`, `dk2`, six accents, hyperlink, and followed hyperlink.
 pub(super) const DEFAULT_THEME_COLORS: [Color; 12] = [
-    Color {
-        alpha: 255,
-        red: 0,
-        green: 0,
-        blue: 0,
-    },
     Color {
         alpha: 255,
         red: 255,
@@ -30,15 +24,21 @@ pub(super) const DEFAULT_THEME_COLORS: [Color; 12] = [
     },
     Color {
         alpha: 255,
-        red: 31,
-        green: 73,
-        blue: 125,
+        red: 0,
+        green: 0,
+        blue: 0,
     },
     Color {
         alpha: 255,
         red: 238,
         green: 236,
         blue: 225,
+    },
+    Color {
+        alpha: 255,
+        red: 31,
+        green: 73,
+        blue: 125,
     },
     Color {
         alpha: 255,
@@ -90,6 +90,8 @@ pub(super) const DEFAULT_THEME_COLORS: [Color; 12] = [
     },
 ];
 
+pub(super) const NO_INDEXED_COLOR_OVERRIDES: [Option<Color>; 64] = [None; 64];
+
 pub(super) fn get_theme_color(theme: u8, theme_colors: &[Color; 12]) -> Color {
     theme_colors
         .get(usize::from(theme))
@@ -101,7 +103,7 @@ pub(super) fn get_theme_color(theme: u8, theme_colors: &[Color; 12]) -> Color {
 ///
 /// The `indexed` attribute is a zero-based offset into the default
 /// `indexedColors` palette, not VBA's one-based `ColorIndex`.
-pub(super) fn get_indexed_color(index: u8) -> Color {
+pub(super) fn get_indexed_color(index: u8, indexed_colors: &[Option<Color>; 64]) -> Color {
     const OOXML_INDEXED_COLORS: [(u8, u8, u8); 64] = [
         (0x00, 0x00, 0x00),
         (0xFF, 0xFF, 0xFF),
@@ -169,6 +171,9 @@ pub(super) fn get_indexed_color(index: u8) -> Color {
         (0x33, 0x33, 0x33),
     ];
 
+    if let Some(color) = indexed_colors.get(usize::from(index)).copied().flatten() {
+        return color;
+    }
     let (red, green, blue) = OOXML_INDEXED_COLORS
         .get(usize::from(index))
         .copied()
@@ -176,53 +181,142 @@ pub(super) fn get_indexed_color(index: u8) -> Color {
     Color::rgb(red, green, blue)
 }
 
-/// Parse color from XML attributes
-fn parse_color(
+fn parse_hex_component(value: &[u8], component: &'static str) -> Result<u8, XlsxError> {
+    let value =
+        std::str::from_utf8(value).map_err(|_| XlsxError::Unexpected("Invalid color value"))?;
+    u8::from_str_radix(value, 16).map_err(|_| XlsxError::Unexpected(component))
+}
+
+fn parse_rgb_color(value: &[u8]) -> Result<Color, XlsxError> {
+    match value.len() {
+        6 => Ok(Color::rgb(
+            parse_hex_component(&value[0..2], "Invalid red color value")?,
+            parse_hex_component(&value[2..4], "Invalid green color value")?,
+            parse_hex_component(&value[4..6], "Invalid blue color value")?,
+        )),
+        8 => Ok(Color::new(
+            parse_hex_component(&value[0..2], "Invalid alpha color value")?,
+            parse_hex_component(&value[2..4], "Invalid red color value")?,
+            parse_hex_component(&value[4..6], "Invalid green color value")?,
+            parse_hex_component(&value[6..8], "Invalid blue color value")?,
+        )),
+        _ => Err(XlsxError::Unexpected("Invalid RGB color length")),
+    }
+}
+
+fn hue_to_rgb(p: f64, q: f64, mut hue: f64) -> f64 {
+    if hue < 0.0 {
+        hue += 1.0;
+    }
+    if hue > 1.0 {
+        hue -= 1.0;
+    }
+    if hue < 1.0 / 6.0 {
+        p + (q - p) * 6.0 * hue
+    } else if hue < 0.5 {
+        q
+    } else if hue < 2.0 / 3.0 {
+        p + (q - p) * (2.0 / 3.0 - hue) * 6.0
+    } else {
+        p
+    }
+}
+
+fn apply_tint(color: Color, tint: f64) -> Color {
+    if tint == 0.0 {
+        return color;
+    }
+    let red = f64::from(color.red) / 255.0;
+    let green = f64::from(color.green) / 255.0;
+    let blue = f64::from(color.blue) / 255.0;
+    let max = red.max(green).max(blue);
+    let min = red.min(green).min(blue);
+    let mut hue = 0.0;
+    let mut saturation = 0.0;
+    let luminance = (max + min) / 2.0;
+
+    if max != min {
+        let delta = max - min;
+        saturation = if luminance > 0.5 {
+            delta / (2.0 - max - min)
+        } else {
+            delta / (max + min)
+        };
+        hue = if max == red {
+            (green - blue) / delta + if green < blue { 6.0 } else { 0.0 }
+        } else if max == green {
+            (blue - red) / delta + 2.0
+        } else {
+            (red - green) / delta + 4.0
+        } / 6.0;
+    }
+
+    let tinted_luminance = if tint < 0.0 {
+        luminance * (1.0 + tint)
+    } else {
+        luminance * (1.0 - tint) + tint
+    };
+    let (red, green, blue) = if saturation == 0.0 {
+        (tinted_luminance, tinted_luminance, tinted_luminance)
+    } else {
+        let q = if tinted_luminance < 0.5 {
+            tinted_luminance * (1.0 + saturation)
+        } else {
+            tinted_luminance + saturation - tinted_luminance * saturation
+        };
+        let p = 2.0 * tinted_luminance - q;
+        (
+            hue_to_rgb(p, q, hue + 1.0 / 3.0),
+            hue_to_rgb(p, q, hue),
+            hue_to_rgb(p, q, hue - 1.0 / 3.0),
+        )
+    };
+    // Convert the transformed HSL channels back to the nearest 8-bit value.
+    let to_byte = |component: f64| (component * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color::new(color.alpha, to_byte(red), to_byte(green), to_byte(blue))
+}
+
+/// Parse and resolve color attributes, including workbook palettes and tint.
+pub(super) fn parse_color(
     attributes: &[Attribute],
     theme_colors: &[Color; 12],
+    indexed_colors: &[Option<Color>; 64],
 ) -> Result<Option<Color>, XlsxError> {
+    let mut color = None;
+    let mut tint = None;
     for attr in attributes {
         match attr.key.as_ref() {
             b"rgb" => {
-                let rgb_str = attr.value.as_ref();
-                if rgb_str.len() == 6 {
-                    // RGB format (6 characters)
-                    let r = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[0..2]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid red color value"))?;
-                    let g = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[2..4]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid green color value"))?;
-                    let b = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[4..6]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid blue color value"))?;
-                    return Ok(Some(Color::rgb(r, g, b)));
-                } else if rgb_str.len() == 8 {
-                    // ARGB format (8 characters)
-                    let a = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[0..2]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid alpha color value"))?;
-                    let r = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[2..4]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid red color value"))?;
-                    let g = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[4..6]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid green color value"))?;
-                    let b = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[6..8]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid blue color value"))?;
-                    return Ok(Some(Color::new(a, r, g, b)));
-                }
+                color = Some(parse_rgb_color(attr.value.as_ref())?);
             }
             b"theme" => {
-                let theme_str = String::from_utf8_lossy(&attr.value);
-                if let Ok(theme_value) = theme_str.parse::<u8>() {
-                    return Ok(Some(get_theme_color(theme_value, theme_colors)));
-                }
+                let theme_value = std::str::from_utf8(attr.value.as_ref())
+                    .map_err(|_| XlsxError::Unexpected("Invalid theme color index"))?
+                    .parse::<u8>()
+                    .map_err(|_| XlsxError::Unexpected("Invalid theme color index"))?;
+                color = Some(get_theme_color(theme_value, theme_colors));
             }
             b"indexed" => {
-                let indexed_str = String::from_utf8_lossy(&attr.value);
-                if let Ok(indexed_value) = indexed_str.parse::<u8>() {
-                    return Ok(Some(get_indexed_color(indexed_value)));
+                let indexed_value = std::str::from_utf8(attr.value.as_ref())
+                    .map_err(|_| XlsxError::Unexpected("Invalid indexed color"))?
+                    .parse::<u8>()
+                    .map_err(|_| XlsxError::Unexpected("Invalid indexed color"))?;
+                color = Some(get_indexed_color(indexed_value, indexed_colors));
+            }
+            b"tint" => {
+                let value = std::str::from_utf8(attr.value.as_ref())
+                    .map_err(|_| XlsxError::Unexpected("Invalid color tint"))?
+                    .parse::<f64>()
+                    .map_err(|_| XlsxError::Unexpected("Invalid color tint"))?;
+                if !value.is_finite() || !(-1.0..=1.0).contains(&value) {
+                    return Err(XlsxError::Unexpected("Invalid color tint"));
                 }
+                tint = Some(value);
             }
             _ => {}
         }
     }
-    Ok(None)
+    Ok(color.map(|color| tint.map_or(color, |tint| apply_tint(color, tint))))
 }
 
 /// Parse font weight from string
@@ -338,6 +432,7 @@ pub fn parse_font<RS: BufRead>(
     xml: &mut Reader<RS>,
     _start_elem: &BytesStart,
     theme_colors: &[Color; 12],
+    indexed_colors: &[Option<Color>; 64],
 ) -> Result<Font, XlsxError> {
     let mut font = Font::new();
 
@@ -448,6 +543,7 @@ pub fn parse_font<RS: BufRead>(
                     if let Some(color) = parse_color(
                         &e.attributes().collect::<Result<Vec<_>, _>>()?,
                         theme_colors,
+                        indexed_colors,
                     )? {
                         font = font.with_color(color);
                     }
@@ -487,6 +583,7 @@ pub fn parse_fill<RS: BufRead>(
     xml: &mut Reader<RS>,
     _start_elem: &BytesStart,
     theme_colors: &[Color; 12],
+    indexed_colors: &[Option<Color>; 64],
 ) -> Result<Fill, XlsxError> {
     let mut fill = Fill::new();
 
@@ -521,6 +618,7 @@ pub fn parse_fill<RS: BufRead>(
                     if let Some(color) = parse_color(
                         &e.attributes().collect::<Result<Vec<_>, _>>()?,
                         theme_colors,
+                        indexed_colors,
                     )? {
                         fill = fill.with_foreground_color(color);
                     }
@@ -529,6 +627,7 @@ pub fn parse_fill<RS: BufRead>(
                     if let Some(color) = parse_color(
                         &e.attributes().collect::<Result<Vec<_>, _>>()?,
                         theme_colors,
+                        indexed_colors,
                     )? {
                         fill = fill.with_background_color(color);
                     }
@@ -556,6 +655,7 @@ pub(super) fn parse_ooxml_bool(value: &[u8]) -> Result<bool, XlsxError> {
 fn border_from_element(
     element: &BytesStart<'_>,
     theme_colors: &[Color; 12],
+    indexed_colors: &[Option<Color>; 64],
 ) -> Result<Border, XlsxError> {
     let attributes = element.attributes().collect::<Result<Vec<_>, _>>()?;
     let mut style = BorderStyle::None;
@@ -565,10 +665,12 @@ fn border_from_element(
         }
     }
 
-    Ok(match parse_color(&attributes, theme_colors)? {
-        Some(color) => Border::with_color(style, color),
-        None => Border::new(style),
-    })
+    Ok(
+        match parse_color(&attributes, theme_colors, indexed_colors)? {
+            Some(color) => Border::with_color(style, color),
+            None => Border::new(style),
+        },
+    )
 }
 
 fn apply_border(
@@ -604,6 +706,7 @@ pub fn parse_border<RS: BufRead>(
     xml: &mut Reader<RS>,
     start_elem: &BytesStart<'_>,
     theme_colors: &[Color; 12],
+    indexed_colors: &[Option<Color>; 64],
 ) -> Result<Borders, XlsxError> {
     let mut borders = Borders::new();
     let mut diagonal_down = false;
@@ -627,7 +730,7 @@ pub fn parse_border<RS: BufRead>(
             Ok(Event::Start(ref element)) if is_border_side(element.local_name().as_ref()) => {
                 let side = element.local_name().as_ref().to_vec();
                 let closing = element.name();
-                let mut border = border_from_element(element, theme_colors)?;
+                let mut border = border_from_element(element, theme_colors, indexed_colors)?;
                 let mut inner_buf = Vec::new();
 
                 loop {
@@ -635,12 +738,12 @@ pub fn parse_border<RS: BufRead>(
                     match xml.read_event_into(&mut inner_buf) {
                         Ok(Event::Start(ref inner)) if inner.local_name().as_ref() == b"color" => {
                             let attributes = inner.attributes().collect::<Result<Vec<_>, _>>()?;
-                            border.color = parse_color(&attributes, theme_colors)?;
+                            border.color = parse_color(&attributes, theme_colors, indexed_colors)?;
                             xml.read_to_end_into(inner.name(), &mut Vec::new())?;
                         }
                         Ok(Event::Empty(ref inner)) if inner.local_name().as_ref() == b"color" => {
                             let attributes = inner.attributes().collect::<Result<Vec<_>, _>>()?;
-                            border.color = parse_color(&attributes, theme_colors)?;
+                            border.color = parse_color(&attributes, theme_colors, indexed_colors)?;
                         }
                         Ok(Event::Start(ref inner)) => {
                             xml.read_to_end_into(inner.name(), &mut Vec::new())?;
@@ -655,7 +758,7 @@ pub fn parse_border<RS: BufRead>(
                 apply_border(&mut borders, &side, border, diagonal_down, diagonal_up);
             }
             Ok(Event::Empty(ref element)) if is_border_side(element.local_name().as_ref()) => {
-                let border = border_from_element(element, theme_colors)?;
+                let border = border_from_element(element, theme_colors, indexed_colors)?;
                 apply_border(
                     &mut borders,
                     element.local_name().as_ref(),
@@ -793,7 +896,12 @@ mod tests {
             Event::Start(element) => element.into_owned(),
             event => panic!("expected font start, got {event:?}"),
         };
-        parse_font(&mut xml, &start, &DEFAULT_THEME_COLORS)
+        parse_font(
+            &mut xml,
+            &start,
+            &DEFAULT_THEME_COLORS,
+            &NO_INDEXED_COLOR_OVERRIDES,
+        )
     }
 
     fn parse_border_xml(source: &[u8]) -> Result<Borders, XlsxError> {
@@ -803,40 +911,85 @@ mod tests {
             Event::Start(element) => element.into_owned(),
             event => panic!("expected border start, got {event:?}"),
         };
-        parse_border(&mut xml, &start, &DEFAULT_THEME_COLORS)
+        parse_border(
+            &mut xml,
+            &start,
+            &DEFAULT_THEME_COLORS,
+            &NO_INDEXED_COLOR_OVERRIDES,
+        )
+    }
+
+    fn parse_color_xml(source: &[u8]) -> Result<Option<Color>, XlsxError> {
+        let mut xml = Reader::from_reader(Cursor::new(source));
+        let mut buf = Vec::new();
+        let element = match xml.read_event_into(&mut buf).unwrap() {
+            Event::Empty(element) => element.into_owned(),
+            event => panic!("expected color element, got {event:?}"),
+        };
+        let attributes = element.attributes().collect::<Result<Vec<_>, _>>()?;
+        parse_color(
+            &attributes,
+            &DEFAULT_THEME_COLORS,
+            &NO_INDEXED_COLOR_OVERRIDES,
+        )
     }
 
     #[test]
     fn indexed_colors_use_zero_based_ooxml_offsets() {
-        assert_eq!(get_indexed_color(0), Color::rgb(0, 0, 0));
-        assert_eq!(get_indexed_color(1), Color::rgb(255, 255, 255));
-        assert_eq!(get_indexed_color(2), Color::rgb(255, 0, 0));
-        assert_eq!(get_indexed_color(7), Color::rgb(0, 255, 255));
-        assert_eq!(get_indexed_color(63), Color::rgb(51, 51, 51));
+        let indexed = &NO_INDEXED_COLOR_OVERRIDES;
+        assert_eq!(get_indexed_color(0, indexed), Color::rgb(0, 0, 0));
+        assert_eq!(get_indexed_color(1, indexed), Color::rgb(255, 255, 255));
+        assert_eq!(get_indexed_color(2, indexed), Color::rgb(255, 0, 0));
+        assert_eq!(get_indexed_color(7, indexed), Color::rgb(0, 255, 255));
+        assert_eq!(get_indexed_color(63, indexed), Color::rgb(51, 51, 51));
     }
 
     #[test]
     fn theme_colors_use_ooxml_slot_order() {
         assert_eq!(
             get_theme_color(0, &DEFAULT_THEME_COLORS),
-            Color::rgb(0, 0, 0)
-        );
-        assert_eq!(
-            get_theme_color(1, &DEFAULT_THEME_COLORS),
             Color::rgb(255, 255, 255)
         );
         assert_eq!(
+            get_theme_color(1, &DEFAULT_THEME_COLORS),
+            Color::rgb(0, 0, 0)
+        );
+        assert_eq!(
             get_theme_color(2, &DEFAULT_THEME_COLORS),
-            Color::rgb(31, 73, 125)
+            Color::rgb(238, 236, 225)
         );
         assert_eq!(
             get_theme_color(3, &DEFAULT_THEME_COLORS),
-            Color::rgb(238, 236, 225)
+            Color::rgb(31, 73, 125)
         );
         assert_eq!(
             get_theme_color(10, &DEFAULT_THEME_COLORS),
             Color::rgb(0, 0, 255)
         );
+    }
+
+    #[test]
+    fn theme_tint_uses_ooxml_hsl_luminance_transform() {
+        assert_eq!(
+            parse_color_xml(br#"<color tint="0.4" theme="4"/>"#).unwrap(),
+            Some(Color::rgb(0x95, 0xB3, 0xD7))
+        );
+        assert_eq!(
+            parse_color_xml(br#"<color theme="4" tint="-1"/>"#).unwrap(),
+            Some(Color::rgb(0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn malformed_or_out_of_range_tint_is_rejected() {
+        for source in [
+            br#"<color theme="4" tint="invalid"/>"#.as_slice(),
+            br#"<color theme="4" tint="NaN"/>"#.as_slice(),
+            br#"<color theme="4" tint="1.01"/>"#.as_slice(),
+            br#"<color theme="4" tint="-1.01"/>"#.as_slice(),
+        ] {
+            assert!(parse_color_xml(source).is_err());
+        }
     }
 
     #[test]

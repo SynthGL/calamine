@@ -230,6 +230,10 @@ impl DataType for Data {
             Data::Float(v) => Some(*v as i64),
             Data::Bool(v) => Some(*v as i64),
             Data::String(v) => atoi_simd::parse::<i64>(v.as_bytes()).ok(),
+            Data::RichText(v) => {
+                let text = v.plain_text();
+                atoi_simd::parse::<i64>(text.as_bytes()).ok()
+            }
             _ => None,
         }
     }
@@ -240,6 +244,7 @@ impl DataType for Data {
             Data::Float(v) => Some(*v),
             Data::Bool(v) => Some((*v as i32).into()),
             Data::String(v) => fast_float2::parse(v).ok(),
+            Data::RichText(v) => fast_float2::parse(v.plain_text()).ok(),
             _ => None,
         }
     }
@@ -569,6 +574,14 @@ impl DataType for DataRef<'_> {
             DataRef::Bool(v) => Some(*v as i64),
             DataRef::String(v) => atoi_simd::parse::<i64>(v.as_bytes()).ok(),
             DataRef::SharedString(v) => atoi_simd::parse::<i64>(v.as_bytes()).ok(),
+            DataRef::SharedRichText(v) => {
+                let text = v.plain_text();
+                atoi_simd::parse::<i64>(text.as_bytes()).ok()
+            }
+            DataRef::RichText(v) => {
+                let text = v.plain_text();
+                atoi_simd::parse::<i64>(text.as_bytes()).ok()
+            }
             _ => None,
         }
     }
@@ -580,6 +593,8 @@ impl DataType for DataRef<'_> {
             DataRef::Bool(v) => Some((*v as i32).into()),
             DataRef::String(v) => fast_float2::parse(v).ok(),
             DataRef::SharedString(v) => fast_float2::parse(v).ok(),
+            DataRef::SharedRichText(v) => fast_float2::parse(v.plain_text()).ok(),
+            DataRef::RichText(v) => fast_float2::parse(v.plain_text()).ok(),
             _ => None,
         }
     }
@@ -1277,6 +1292,26 @@ mod tests {
         assert_eq!(Data::Bool(false).as_f64(), Some(0.0));
         assert_eq!(DataRef::Bool(true).as_f64(), Some(1.0));
         assert_eq!(DataRef::Bool(false).as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn test_rich_text_numeric_conversions_match_plain_strings() {
+        let integer = RichText::from_runs(vec![
+            crate::TextRun::new("12".to_string()),
+            crate::TextRun::new("3".to_string()),
+        ]);
+        let float = RichText::from_runs(vec![
+            crate::TextRun::new("-12".to_string()),
+            crate::TextRun::new(".5".to_string()),
+        ]);
+
+        assert_eq!(Data::RichText(integer.clone()).as_i64(), Some(123));
+        assert_eq!(Data::RichText(float.clone()).as_f64(), Some(-12.5));
+
+        assert_eq!(DataRef::SharedRichText(&integer).as_i64(), Some(123));
+        assert_eq!(DataRef::RichText(integer).as_i64(), Some(123));
+        assert_eq!(DataRef::SharedRichText(&float).as_f64(), Some(-12.5));
+        assert_eq!(DataRef::RichText(float).as_f64(), Some(-12.5));
     }
 
     #[test]

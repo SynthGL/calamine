@@ -48,10 +48,12 @@ pub const MAX_COLUMNS: u32 = 16_384;
 
 fn theme_slot(name: &[u8]) -> Option<usize> {
     match name {
-        b"dk1" => Some(0),
-        b"lt1" => Some(1),
-        b"dk2" => Some(2),
-        b"lt2" => Some(3),
+        // SpreadsheetML's numeric theme indices use the effective display
+        // order, which swaps each lt/dk pair from clrScheme's XML child order.
+        b"lt1" => Some(0),
+        b"dk1" => Some(1),
+        b"lt2" => Some(2),
+        b"dk2" => Some(3),
         b"accent1" => Some(4),
         b"accent2" => Some(5),
         b"accent3" => Some(6),
@@ -62,6 +64,57 @@ fn theme_slot(name: &[u8]) -> Option<usize> {
         b"folHlink" => Some(11),
         _ => None,
     }
+}
+
+fn resolve_workbook_relationship_target(target: &str) -> Result<String, XlsxError> {
+    let normalized = target.replace('\\', "/");
+    let combined = if let Some(absolute) = normalized.strip_prefix('/') {
+        absolute.to_string()
+    } else {
+        format!("xl/{normalized}")
+    };
+    let mut components = Vec::new();
+    for component in combined.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if components.pop().is_none() {
+                    return Err(XlsxError::Unexpected("invalid workbook relationship path"));
+                }
+            }
+            value => components.push(value),
+        }
+    }
+    if components.is_empty() {
+        return Err(XlsxError::Unexpected("invalid workbook relationship path"));
+    }
+    Ok(components.join("/"))
+}
+
+fn zip_contains_path<RS: Read + Seek>(zip: &ZipArchive<RS>, path: &str) -> bool {
+    zip.file_names().any(|zip_path| {
+        let normalized_path = zip_path.replace('\\', "/");
+        path.eq_ignore_ascii_case(&normalized_path)
+    })
+}
+
+/// Preserve support for producers that write root-relative `xl/...` targets
+/// without the leading slash, but only when the standards-relative target is
+/// absent and the root-relative part actually exists in the package.
+fn legacy_rootish_workbook_target<RS: Read + Seek>(
+    zip: &ZipArchive<RS>,
+    target: &str,
+) -> Option<String> {
+    let normalized = target.replace('\\', "/");
+    if normalized.starts_with('/') || !normalized.starts_with("xl/") {
+        return None;
+    }
+    let standards_relative = resolve_workbook_relationship_target(&normalized).ok()?;
+    if zip_contains_path(zip, &standards_relative) {
+        return None;
+    }
+    let rootish = resolve_workbook_relationship_target(&format!("/{normalized}")).ok()?;
+    zip_contains_path(zip, &rootish).then_some(rootish)
 }
 
 fn parse_theme_rgb(value: &[u8]) -> Result<crate::Color, XlsxError> {
@@ -350,6 +403,11 @@ impl FromStr for CellErrorType {
 
 type Tables = Option<Vec<(String, String, Vec<String>, Dimensions)>>;
 
+struct WorkbookRelationships {
+    targets: BTreeMap<Vec<u8>, String>,
+    theme_path: Option<String>,
+}
+
 /// A struct representing xml zipped excel file
 /// Xlsx, Xlsm, Xlam
 pub struct Xlsx<RS> {
@@ -366,6 +424,8 @@ pub struct Xlsx<RS> {
     pub styles: Vec<Style>,
     /// Resolved workbook theme in SpreadsheetML slot order.
     theme_colors: [crate::Color; 12],
+    /// Workbook-specific replacements for the 64 indexed-color slots.
+    indexed_colors: Box<[Option<crate::Color>; 64]>,
     /// 1904 datetime system
     is_1904: bool,
     /// Metadata
@@ -387,8 +447,12 @@ struct XlsxOptions {
 }
 
 impl<RS: Read + Seek> Xlsx<RS> {
-    fn read_theme(&mut self) -> Result<(), XlsxError> {
-        let mut xml = match xml_reader(&mut self.zip, "xl/theme/theme1.xml") {
+    fn read_theme(&mut self, theme_path: Option<&str>) -> Result<(), XlsxError> {
+        const CONVENTIONAL_THEME_PATH: &str = "xl/theme/theme1.xml";
+        let theme_path = theme_path
+            .filter(|path| zip_contains_path(&self.zip, path))
+            .unwrap_or(CONVENTIONAL_THEME_PATH);
+        let mut xml = match xml_reader(&mut self.zip, theme_path) {
             None => return Ok(()),
             Some(reader) => reader?,
         };
@@ -441,6 +505,54 @@ impl<RS: Read + Seek> Xlsx<RS> {
         Ok(())
     }
 
+    fn read_indexed_colors(&mut self) -> Result<(), XlsxError> {
+        let mut xml = match xml_reader(&mut self.zip, "xl/styles.xml") {
+            None => return Ok(()),
+            Some(reader) => reader?,
+        };
+        let mut buf = Vec::with_capacity(1024);
+        let mut in_indexed_colors = false;
+        let mut index = 0usize;
+
+        loop {
+            buf.clear();
+            match xml.read_event_into(&mut buf) {
+                Ok(Event::Start(ref element))
+                    if element.local_name().as_ref() == b"indexedColors" =>
+                {
+                    in_indexed_colors = true;
+                }
+                Ok(Event::Start(ref element))
+                    if in_indexed_colors && element.local_name().as_ref() == b"rgbColor" =>
+                {
+                    if index < self.indexed_colors.len() {
+                        let attributes = element.attributes().collect::<Result<Vec<_>, _>>()?;
+                        if let Some(color) = style_parser::parse_color(
+                            &attributes,
+                            &self.theme_colors,
+                            &self.indexed_colors,
+                        )? {
+                            self.indexed_colors[index] = Some(color);
+                        }
+                    }
+                    // Preserve sequence positions even for an omitted optional
+                    // rgb attribute, and bound storage without rejecting schema-
+                    // valid palettes that contain more entries than we expose.
+                    index = index.saturating_add(1);
+                }
+                Ok(Event::End(ref element))
+                    if element.local_name().as_ref() == b"indexedColors" =>
+                {
+                    break;
+                }
+                Ok(Event::Eof) => break,
+                Err(error) => return Err(XlsxError::Xml(error)),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn read_shared_strings(&mut self) -> Result<(), XlsxError> {
         let mut xml = match xml_reader(&mut self.zip, "xl/sharedStrings.xml") {
             None => return Ok(()),
@@ -451,7 +563,12 @@ impl<RS: Read + Seek> Xlsx<RS> {
             buf.clear();
             match xml.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) if e.local_name().as_ref() == b"si" => {
-                    if let Some(data) = read_rich_string(&mut xml, e.name(), &self.theme_colors)? {
+                    if let Some(data) = read_rich_string(
+                        &mut xml,
+                        e.name(),
+                        &self.theme_colors,
+                        &self.indexed_colors,
+                    )? {
                         self.strings.push(data);
                     }
                 }
@@ -522,7 +639,12 @@ impl<RS: Read + Seek> Xlsx<RS> {
                     inner_buf.clear();
                     match xml.read_event_into(&mut inner_buf) {
                         Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"font" => {
-                            let font = style_parser::parse_font(&mut xml, e, &self.theme_colors)?;
+                            let font = style_parser::parse_font(
+                                &mut xml,
+                                e,
+                                &self.theme_colors,
+                                &self.indexed_colors,
+                            )?;
                             fonts.push(font);
                         }
                         Ok(Event::End(ref e)) if e.local_name().as_ref() == b"fonts" => break,
@@ -535,7 +657,12 @@ impl<RS: Read + Seek> Xlsx<RS> {
                     inner_buf.clear();
                     match xml.read_event_into(&mut inner_buf) {
                         Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"fill" => {
-                            let fill = style_parser::parse_fill(&mut xml, e, &self.theme_colors)?;
+                            let fill = style_parser::parse_fill(
+                                &mut xml,
+                                e,
+                                &self.theme_colors,
+                                &self.indexed_colors,
+                            )?;
                             fills.push(fill);
                         }
                         Ok(Event::End(ref e)) if e.local_name().as_ref() == b"fills" => break,
@@ -548,8 +675,12 @@ impl<RS: Read + Seek> Xlsx<RS> {
                     inner_buf.clear();
                     match xml.read_event_into(&mut inner_buf) {
                         Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"border" => {
-                            let border =
-                                style_parser::parse_border(&mut xml, e, &self.theme_colors)?;
+                            let border = style_parser::parse_border(
+                                &mut xml,
+                                e,
+                                &self.theme_colors,
+                                &self.indexed_colors,
+                            )?;
                             borders.push(border);
                         }
                         Ok(Event::End(ref e)) if e.local_name().as_ref() == b"borders" => break,
@@ -685,10 +816,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
         Ok(())
     }
 
-    fn read_workbook(
-        &mut self,
-        relationships: &BTreeMap<Vec<u8>, String>,
-    ) -> Result<(), XlsxError> {
+    fn read_workbook(&mut self, relationships: &WorkbookRelationships) -> Result<(), XlsxError> {
         let mut xml = match xml_reader(&mut self.zip, "xl/workbook.xml") {
             None => return Ok(()),
             Some(x) => x?,
@@ -733,18 +861,11 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                 key: QName(b"r:id" | b"relationships:id"),
                                 value: v,
                             } => {
-                                let r = &relationships
+                                let target = relationships
+                                    .targets
                                     .get(&*v)
-                                    .ok_or(XlsxError::RelationshipNotFound)?[..];
-                                // target may have prepended "/xl/" or "xl/" path;
-                                // strip if present
-                                path = if r.starts_with("/xl/") {
-                                    r[1..].to_string()
-                                } else if r.starts_with("xl/") {
-                                    r.to_string()
-                                } else {
-                                    format!("xl/{r}")
-                                };
+                                    .ok_or(XlsxError::RelationshipNotFound)?;
+                                path = resolve_workbook_relationship_target(target)?;
                             }
                             _ => (),
                         }
@@ -808,7 +929,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
         Ok(())
     }
 
-    fn read_relationships(&mut self) -> Result<BTreeMap<Vec<u8>, String>, XlsxError> {
+    fn read_relationships(&mut self) -> Result<WorkbookRelationships, XlsxError> {
         let mut xml = match xml_reader(&mut self.zip, "xl/_rels/workbook.xml.rels") {
             None => {
                 return Err(XlsxError::FileNotFound(
@@ -817,7 +938,8 @@ impl<RS: Read + Seek> Xlsx<RS> {
             }
             Some(x) => x?,
         };
-        let mut relationships = BTreeMap::new();
+        let mut targets = BTreeMap::new();
+        let mut theme_target = None;
         let mut buf = Vec::with_capacity(64);
         loop {
             buf.clear();
@@ -825,20 +947,34 @@ impl<RS: Read + Seek> Xlsx<RS> {
                 Ok(Event::Start(e)) if e.local_name().as_ref() == b"Relationship" => {
                     let mut id = Vec::new();
                     let mut target = String::new();
-                    for a in e.attributes() {
-                        match a? {
-                            Attribute {
-                                key: QName(b"Id"),
-                                value: v,
-                            } => id.extend_from_slice(&v),
-                            Attribute {
-                                key: QName(b"Target"),
-                                value: v,
-                            } => target = xml.decoder().decode(&v)?.into_owned(),
-                            _ => (),
+                    let mut relationship_type = String::new();
+                    let mut external = false;
+                    for attribute in e.attributes() {
+                        let attribute = attribute?;
+                        match attribute.key.as_ref() {
+                            b"Id" => id.extend_from_slice(&attribute.value),
+                            b"Target" => {
+                                target = attribute
+                                    .decode_and_unescape_value(xml.decoder())?
+                                    .into_owned();
+                            }
+                            b"Type" => {
+                                relationship_type = attribute
+                                    .decode_and_unescape_value(xml.decoder())?
+                                    .into_owned();
+                            }
+                            b"TargetMode" => {
+                                external = attribute
+                                    .decode_and_unescape_value(xml.decoder())?
+                                    .eq_ignore_ascii_case("external");
+                            }
+                            _ => {}
                         }
                     }
-                    relationships.insert(id, target);
+                    if !external && relationship_type.ends_with("/theme") {
+                        theme_target = Some(target.clone());
+                    }
+                    targets.insert(id, target);
                 }
                 Ok(Event::End(e)) if e.local_name().as_ref() == b"Relationships" => break,
                 Ok(Event::Eof) => return Err(XlsxError::XmlEof("Relationships")),
@@ -846,7 +982,28 @@ impl<RS: Read + Seek> Xlsx<RS> {
                 _ => (),
             }
         }
-        Ok(relationships)
+        drop(xml);
+
+        // Targets are relative to xl/workbook.xml. A few producers historically
+        // emitted rootish `xl/...` paths without the required leading slash;
+        // prefer the standards-relative part and use that legacy spelling only
+        // when it is the part that actually exists in the archive.
+        for target in targets.values_mut() {
+            if let Some(rootish) = legacy_rootish_workbook_target(&self.zip, target) {
+                *target = format!("/{rootish}");
+            }
+        }
+        let theme_path = theme_target
+            .map(|target| {
+                legacy_rootish_workbook_target(&self.zip, &target)
+                    .map_or_else(|| resolve_workbook_relationship_target(&target), Ok)
+            })
+            .transpose()?;
+
+        Ok(WorkbookRelationships {
+            targets,
+            theme_path,
+        })
     }
 
     // sheets must be added before this is called!!
@@ -1878,7 +2035,15 @@ impl<RS: Read + Seek> Xlsx<RS> {
         let formats = &self.formats;
         let styles = &self.styles;
         let theme_colors = &self.theme_colors;
-        XlsxCellReader::new_with_theme(xml, strings, formats, styles, theme_colors, is_1904)
+        let indexed_colors = &self.indexed_colors;
+        XlsxCellReader::new_with_theme(
+            xml,
+            strings,
+            formats,
+            styles,
+            (theme_colors, indexed_colors),
+            is_1904,
+        )
     }
 
     /// Get the styles for a worksheet.
@@ -2203,6 +2368,7 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
             formats: Vec::new(),
             styles: Vec::new(),
             theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
             is_1904: false,
             sheets: Vec::new(),
             tables: None,
@@ -2212,10 +2378,11 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
             merged_regions: None,
             options: XlsxOptions::default(),
         };
-        xlsx.read_theme()?;
+        let relationships = xlsx.read_relationships()?;
+        xlsx.read_theme(relationships.theme_path.as_deref())?;
+        xlsx.read_indexed_colors()?;
         xlsx.read_shared_strings()?;
         xlsx.read_styles()?;
-        let relationships = xlsx.read_relationships()?;
         xlsx.read_workbook(&relationships)?;
         #[cfg(feature = "picture")]
         xlsx.read_pictures()?;
@@ -2522,6 +2689,7 @@ fn parse_run_properties<RS>(
     xml: &mut XlReader<'_, RS>,
     closing: QName,
     theme_colors: &[crate::Color; 12],
+    indexed_colors: &[Option<crate::Color>; 64],
 ) -> Result<Option<RunPropertiesResult>, XlsxError>
 where
     RS: Read + Seek,
@@ -2618,7 +2786,7 @@ where
                     }
                     b"color" => {
                         // Font color - counts as rich formatting
-                        if let Some(color) = parse_run_color(&e, theme_colors)? {
+                        if let Some(color) = parse_run_color(&e, theme_colors, indexed_colors)? {
                             font = font.with_color(color);
                             has_any_props = true;
                             has_rich_formatting = true;
@@ -2670,50 +2838,10 @@ where
 fn parse_run_color(
     e: &quick_xml::events::BytesStart<'_>,
     theme_colors: &[crate::Color; 12],
+    indexed_colors: &[Option<crate::Color>; 64],
 ) -> Result<Option<crate::Color>, XlsxError> {
-    use crate::Color;
-
-    for attr in e.attributes().flatten() {
-        match attr.key.as_ref() {
-            b"rgb" => {
-                let rgb_str = attr.value.as_ref();
-                if rgb_str.len() == 6 {
-                    let r = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[0..2]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid red color value"))?;
-                    let g = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[2..4]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid green color value"))?;
-                    let b = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[4..6]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid blue color value"))?;
-                    return Ok(Some(Color::rgb(r, g, b)));
-                } else if rgb_str.len() == 8 {
-                    let a = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[0..2]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid alpha color value"))?;
-                    let r = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[2..4]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid red color value"))?;
-                    let g = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[4..6]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid green color value"))?;
-                    let b = u8::from_str_radix(&String::from_utf8_lossy(&rgb_str[6..8]), 16)
-                        .map_err(|_| XlsxError::Unexpected("Invalid blue color value"))?;
-                    return Ok(Some(Color::new(a, r, g, b)));
-                }
-            }
-            b"theme" => {
-                let theme_str = String::from_utf8_lossy(&attr.value);
-                if let Ok(theme) = theme_str.parse::<u8>() {
-                    return Ok(Some(style_parser::get_theme_color(theme, theme_colors)));
-                }
-            }
-            b"indexed" => {
-                // Indexed colors
-                let idx_str = String::from_utf8_lossy(&attr.value);
-                if let Ok(idx) = idx_str.parse::<u8>() {
-                    return Ok(Some(style_parser::get_indexed_color(idx)));
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(None)
+    let attributes = e.attributes().collect::<Result<Vec<_>, _>>()?;
+    style_parser::parse_color(&attributes, theme_colors, indexed_colors)
 }
 
 /// Read a string from shared strings, preserving rich text formatting if present.
@@ -2722,6 +2850,7 @@ fn read_rich_string<RS>(
     xml: &mut XlReader<'_, RS>,
     closing: QName,
     theme_colors: &[crate::Color; 12],
+    indexed_colors: &[Option<crate::Color>; 64],
 ) -> Result<Option<Data>, XlsxError>
 where
     RS: Read + Seek,
@@ -2749,7 +2878,7 @@ where
             }
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"rPr" => {
                 // Run properties (formatting)
-                current_props = parse_run_properties(xml, e.name(), theme_colors)?;
+                current_props = parse_run_properties(xml, e.name(), theme_colors, indexed_colors)?;
                 if let Some(ref props) = current_props {
                     if props.has_rich_formatting {
                         has_any_rich_formatting = true;
@@ -3894,6 +4023,7 @@ mod tests {
             formats,
             styles,
             theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
             is_1904: false,
             metadata: Metadata::default(),
             #[cfg(feature = "picture")]
@@ -4379,6 +4509,7 @@ mod tests {
             formats: Vec::new(),
             styles: Vec::new(),
             theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
             is_1904: false,
             metadata: Metadata::default(),
             #[cfg(feature = "picture")]
@@ -4386,16 +4517,18 @@ mod tests {
             merged_regions: None,
             options: XlsxOptions::default(),
         };
-        workbook.read_theme().unwrap();
+        // Missing relationship metadata retains the conventional theme1.xml
+        // fallback that older versions supported.
+        workbook.read_theme(None).unwrap();
         assert_eq!(
-            workbook.theme_colors[0],
+            workbook.theme_colors[1],
             crate::Color::rgb(0x10, 0x20, 0x30)
         );
         assert_eq!(
             workbook.theme_colors[4],
             crate::Color::rgb(0xA1, 0xB2, 0xC3)
         );
-        assert_eq!(workbook.theme_colors[1], crate::Color::rgb(255, 255, 255));
+        assert_eq!(workbook.theme_colors[0], crate::Color::rgb(255, 255, 255));
 
         let mut font_xml = XmlReader::from_reader(Cursor::new(
             br#"<font><color theme="4"/></font>"#.as_slice(),
@@ -4406,7 +4539,13 @@ mod tests {
             Event::Start(element) => element.into_owned(),
             event => panic!("expected font start, got {event:?}"),
         };
-        let font = style_parser::parse_font(&mut font_xml, &start, &workbook.theme_colors).unwrap();
+        let font = style_parser::parse_font(
+            &mut font_xml,
+            &start,
+            &workbook.theme_colors,
+            &workbook.indexed_colors,
+        )
+        .unwrap();
         assert_eq!(font.color, Some(crate::Color::rgb(0xA1, 0xB2, 0xC3)));
 
         let mut color_xml =
@@ -4417,9 +4556,215 @@ mod tests {
             event => panic!("expected color element, got {event:?}"),
         };
         assert_eq!(
-            parse_run_color(&color_element, &workbook.theme_colors).unwrap(),
+            parse_run_color(
+                &color_element,
+                &workbook.theme_colors,
+                &workbook.indexed_colors,
+            )
+            .unwrap(),
             Some(crate::Color::rgb(0xA1, 0xB2, 0xC3))
         );
+    }
+
+    #[test]
+    fn test_theme_tint_feeds_style_and_rich_text_parsers() {
+        let mut font_xml = XmlReader::from_reader(Cursor::new(
+            br#"<font><color theme="4" tint="0.4"/></font>"#.as_slice(),
+        ));
+        font_xml.config_mut().expand_empty_elements = true;
+        let mut buf = Vec::new();
+        let start = match font_xml.read_event_into(&mut buf).unwrap() {
+            Event::Start(element) => element.into_owned(),
+            event => panic!("expected font start, got {event:?}"),
+        };
+        let font = style_parser::parse_font(
+            &mut font_xml,
+            &start,
+            &style_parser::DEFAULT_THEME_COLORS,
+            &style_parser::NO_INDEXED_COLOR_OVERRIDES,
+        )
+        .unwrap();
+        let expected = crate::Color::rgb(0x95, 0xB3, 0xD7);
+        assert_eq!(font.color, Some(expected));
+
+        let mut color_xml =
+            XmlReader::from_reader(Cursor::new(br#"<color theme="4" tint="0.4"/>"#.as_slice()));
+        let mut buf = Vec::new();
+        let color_element = match color_xml.read_event_into(&mut buf).unwrap() {
+            Event::Empty(element) => element.into_owned(),
+            event => panic!("expected color element, got {event:?}"),
+        };
+        assert_eq!(
+            parse_run_color(
+                &color_element,
+                &style_parser::DEFAULT_THEME_COLORS,
+                &style_parser::NO_INDEXED_COLOR_OVERRIDES,
+            )
+            .unwrap(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn test_theme_part_comes_from_workbook_relationship() {
+        let relationships_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rIdLegacy" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="xl/worksheets/legacy.xml"/>
+  <Relationship Id="rIdEscaped" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="customThemes/A&amp;B.xml"/>
+  <Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="customThemes/ocean.xml"/>
+  <Relationship Id="rIdExternal" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="https://example.invalid/theme.xml" TargetMode="External"/>
+</Relationships>"#;
+        let theme_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <a:themeElements><a:clrScheme name="Ocean">
+    <a:accent1><a:srgbClr val="123456"/></a:accent1>
+  </a:clrScheme></a:themeElements>
+</a:theme>"#;
+        let cursor = Cursor::new(Vec::new());
+        let mut zip_writer = ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip_writer
+            .start_file("xl/_rels/workbook.xml.rels", options)
+            .unwrap();
+        zip_writer.write_all(relationships_xml).unwrap();
+        zip_writer
+            .start_file("xl/customThemes/ocean.xml", options)
+            .unwrap();
+        zip_writer.write_all(theme_xml).unwrap();
+        zip_writer
+            .start_file("xl/worksheets/legacy.xml", options)
+            .unwrap();
+        zip_writer.write_all(b"<worksheet/>").unwrap();
+        let mut cursor = zip_writer.finish().unwrap();
+        cursor.set_position(0);
+
+        let mut workbook = Xlsx {
+            zip: ZipArchive::new(cursor).unwrap(),
+            strings: Vec::new(),
+            sheets: Vec::new(),
+            tables: None,
+            formats: Vec::new(),
+            styles: Vec::new(),
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
+            is_1904: false,
+            metadata: Metadata::default(),
+            #[cfg(feature = "picture")]
+            pictures: None,
+            merged_regions: None,
+            options: XlsxOptions::default(),
+        };
+
+        let relationships = workbook.read_relationships().unwrap();
+        assert_eq!(
+            relationships.targets.get(b"rId1".as_slice()),
+            Some(&"worksheets/sheet1.xml".to_string())
+        );
+        assert_eq!(
+            relationships.targets.get(b"rIdLegacy".as_slice()),
+            Some(&"/xl/worksheets/legacy.xml".to_string())
+        );
+        assert_eq!(
+            relationships.targets.get(b"rIdEscaped".as_slice()),
+            Some(&"customThemes/A&B.xml".to_string())
+        );
+        assert_eq!(
+            relationships.theme_path.as_deref(),
+            Some("xl/customThemes/ocean.xml")
+        );
+        workbook
+            .read_theme(relationships.theme_path.as_deref())
+            .unwrap();
+        assert_eq!(
+            workbook.theme_colors[4],
+            crate::Color::rgb(0x12, 0x34, 0x56)
+        );
+
+        assert_eq!(
+            resolve_workbook_relationship_target("/xl/theme/theme1.xml").unwrap(),
+            "xl/theme/theme1.xml"
+        );
+        assert_eq!(
+            resolve_workbook_relationship_target("xl/theme/theme1.xml").unwrap(),
+            "xl/xl/theme/theme1.xml"
+        );
+        assert!(resolve_workbook_relationship_target("../../outside.xml").is_err());
+    }
+
+    #[test]
+    fn test_custom_indexed_colors_feed_style_and_rich_text_parsers() {
+        let mut styles_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><color indexed="2"/></font></fonts>
+  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+  <borders count="1"><border/></borders>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellXfs>
+  <colors><indexedColors>
+    <rgbColor rgb="FF000000"/><rgbColor/><rgbColor rgb="FF112233"/>"#
+            .to_string();
+        // CT_IndexedColors is unbounded. Only the first 64 slots are retained,
+        // but extra schema-valid entries must not reject the workbook.
+        styles_xml.push_str(&r#"<rgbColor rgb="FFABCDEF"/>"#.repeat(62));
+        styles_xml.push_str("</indexedColors></colors></styleSheet>");
+        let shared_strings_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <si><r><rPr><color indexed="2"/></rPr><t>custom</t></r></si>
+</sst>"#;
+        let cursor = Cursor::new(Vec::new());
+        let mut zip_writer = ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip_writer.start_file("xl/styles.xml", options).unwrap();
+        zip_writer.write_all(styles_xml.as_bytes()).unwrap();
+        zip_writer
+            .start_file("xl/sharedStrings.xml", options)
+            .unwrap();
+        zip_writer.write_all(shared_strings_xml).unwrap();
+        let mut cursor = zip_writer.finish().unwrap();
+        cursor.set_position(0);
+
+        let mut workbook = Xlsx {
+            zip: ZipArchive::new(cursor).unwrap(),
+            strings: Vec::new(),
+            sheets: Vec::new(),
+            tables: None,
+            formats: Vec::new(),
+            styles: Vec::new(),
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
+            is_1904: false,
+            metadata: Metadata::default(),
+            #[cfg(feature = "picture")]
+            pictures: None,
+            merged_regions: None,
+            options: XlsxOptions::default(),
+        };
+
+        workbook.read_indexed_colors().unwrap();
+        workbook.read_shared_strings().unwrap();
+        workbook.read_styles().unwrap();
+        let expected = crate::Color::rgb(0x11, 0x22, 0x33);
+        assert_eq!(workbook.indexed_colors[1], None);
+        assert_eq!(
+            style_parser::get_indexed_color(1, &workbook.indexed_colors),
+            crate::Color::rgb(255, 255, 255)
+        );
+        assert_eq!(workbook.indexed_colors[2], Some(expected));
+        assert_eq!(
+            workbook.styles[0].font.as_ref().unwrap().color,
+            Some(expected)
+        );
+        match &workbook.strings[0] {
+            Data::RichText(rich_text) => {
+                assert_eq!(
+                    rich_text.runs[0].font.as_ref().unwrap().color,
+                    Some(expected)
+                );
+            }
+            value => panic!("expected rich text, got {value:?}"),
+        }
     }
 
     #[test]
@@ -4586,6 +4931,7 @@ mod tests {
             formats: vec![],
             styles: Vec::new(),
             theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
             is_1904: false,
             metadata: Metadata::default(),
             #[cfg(feature = "picture")]

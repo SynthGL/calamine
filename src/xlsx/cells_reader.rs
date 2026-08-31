@@ -24,6 +24,7 @@ use crate::{
 };
 
 type FormulaMap = HashMap<(u32, u32), (i64, i64)>;
+type ColorPalettes<'a> = (&'a [Color; 12], &'a [Option<Color>; 64]);
 
 /// An xlsx Cell Iterator
 pub struct XlsxCellReader<'a, RS>
@@ -35,6 +36,7 @@ where
     formats: &'a [CellFormat],
     styles: &'a [Style],
     theme_colors: &'a [Color; 12],
+    indexed_colors: &'a [Option<Color>; 64],
     is_1904: bool,
     dimensions: Dimensions,
     row_index: u32,
@@ -60,7 +62,10 @@ where
             strings,
             formats,
             styles,
-            &style_parser::DEFAULT_THEME_COLORS,
+            (
+                &style_parser::DEFAULT_THEME_COLORS,
+                &style_parser::NO_INDEXED_COLOR_OVERRIDES,
+            ),
             is_1904,
         )
     }
@@ -70,7 +75,7 @@ where
         strings: &'a [Data],
         formats: &'a [CellFormat],
         styles: &'a [Style],
-        theme_colors: &'a [Color; 12],
+        color_palettes: ColorPalettes<'a>,
         is_1904: bool,
     ) -> Result<Self, XlsxError> {
         let mut dimensions = Dimensions {
@@ -96,7 +101,8 @@ where
                                 strings,
                                 formats,
                                 styles,
-                                theme_colors,
+                                theme_colors: color_palettes.0,
+                                indexed_colors: color_palettes.1,
                                 is_1904,
                                 dimensions,
                                 row_index: 0,
@@ -201,7 +207,7 @@ where
                                 value = read_value(
                                     self.strings,
                                     self.formats,
-                                    self.theme_colors,
+                                    (self.theme_colors, self.indexed_colors),
                                     self.is_1904,
                                     &mut self.xml,
                                     &e,
@@ -535,7 +541,7 @@ where
 fn read_value<'s, RS>(
     strings: &'s [Data],
     formats: &[CellFormat],
-    theme_colors: &[Color; 12],
+    color_palettes: ColorPalettes<'_>,
     is_1904: bool,
     xml: &mut XlReader<'_, RS>,
     e: &BytesStart<'_>,
@@ -547,7 +553,7 @@ where
     Ok(match e.local_name().as_ref() {
         b"is" => {
             // inlineStr
-            match read_rich_string(xml, e.name(), theme_colors)? {
+            match read_rich_string(xml, e.name(), color_palettes.0, color_palettes.1)? {
                 Some(Data::String(value)) => DataRef::String(value),
                 Some(Data::RichText(value)) => DataRef::RichText(value),
                 Some(_) => {

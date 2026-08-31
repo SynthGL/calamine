@@ -608,6 +608,13 @@ macro_rules! deserialize_num {
                     })?;
                     visitor.$visit(v)
                 }
+                Data::RichText(rich_text) => {
+                    let text = rich_text.plain_text();
+                    let v = text.parse().map_err(|_| {
+                        DeError::Custom(format!("Expecting {}, got '{}'", stringify!($typ), text))
+                    })?;
+                    visitor.$visit(v)
+                }
                 Data::Error(err) => Err(DeError::CellError {
                     err: err.clone(),
                     pos: self.pos,
@@ -840,6 +847,38 @@ mod tests {
             )
             .unwrap(),
             Content::Foo
+        );
+    }
+
+    #[test]
+    fn test_deserialize_numbers_from_rich_text_plain_value() {
+        use crate::{RichText, TextRun, ToCellDeserializer};
+        use serde::Deserialize;
+
+        let integer = super::Data::RichText(RichText::from_runs(vec![
+            TextRun::new("12".to_string()),
+            TextRun::new("3".to_string()),
+        ]));
+        let float = super::Data::RichText(RichText::from_runs(vec![
+            TextRun::new("-12".to_string()),
+            TextRun::new(".5".to_string()),
+        ]));
+
+        assert_eq!(
+            i64::deserialize(integer.to_cell_deserializer((0, 0))).unwrap(),
+            123
+        );
+        assert_eq!(
+            u32::deserialize(integer.to_cell_deserializer((0, 0))).unwrap(),
+            123
+        );
+        assert_eq!(
+            f64::deserialize(float.to_cell_deserializer((0, 0))).unwrap(),
+            -12.5
+        );
+        assert_eq!(
+            f32::deserialize(float.to_cell_deserializer((0, 0))).unwrap(),
+            -12.5
         );
     }
 }

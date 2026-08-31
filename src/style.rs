@@ -1004,12 +1004,12 @@ impl Style {
 #[derive(Debug, Clone)]
 struct StyleRun {
     /// Index into the palette (0 = no style/default)
-    style_id: u16,
+    style_id: u32,
     /// Number of consecutive cells with this style
     count: u32,
 }
 
-fn push_style_run(runs: &mut Vec<StyleRun>, style_id: u16, mut count: u64) {
+fn push_style_run(runs: &mut Vec<StyleRun>, style_id: u32, mut count: u64) {
     if count == 0 {
         return;
     }
@@ -1059,9 +1059,12 @@ impl StyleRange {
         Self::default()
     }
 
-    /// Create a StyleRange from style IDs and a palette (zero-copy).
+    /// Create a StyleRange from style IDs and a palette without cloning styles.
     ///
-    /// This is more efficient than `from_sparse` as it avoids cloning styles.
+    /// This is more efficient than `from_sparse` when the caller already has a
+    /// palette. Input IDs are zero-based indexes into that palette; the range
+    /// reserves a separate internal entry for synthesized sparse gaps. Invalid
+    /// input IDs are treated as unstyled cells.
     ///
     /// - `cells`: Vec of (row, col, style_id) where style_id indexes into palette
     /// - `palette`: The shared palette of unique styles (taken ownership)
@@ -1069,6 +1072,16 @@ impl StyleRange {
         if cells.is_empty() {
             return Self::empty();
         }
+
+        // StyleRun ID 0 is reserved for synthesized sparse gaps. Workbook
+        // cellXfs IDs are also zero-based, so shift every valid workbook
+        // palette index by one instead of allowing real style 0 to fill gaps.
+        // `u32` run IDs avoid aliasing distinct styles at the old u16 ceiling
+        // without doubling each run's footprint on 64-bit targets.
+        let workbook_palette_len = palette.len();
+        let mut range_palette = Vec::with_capacity(workbook_palette_len.saturating_add(1));
+        range_palette.push(Style::default());
+        range_palette.extend(palette);
 
         let mut row_start = u32::MAX;
         let mut row_end = 0;
@@ -1093,7 +1106,18 @@ impl StyleRange {
             let relative_row = u64::from(row - row_start);
             let relative_column = u64::from(column - col_start);
             let linear_index = relative_row * width + relative_column;
-            sparse_ids.insert(linear_index, style_id.min(u16::MAX as usize) as u16);
+            let range_style_id = if style_id < workbook_palette_len && style_id < u32::MAX as usize
+            {
+                // Slot zero is reserved, so the largest representable source
+                // palette index is u32::MAX - 1. Larger theoretical palettes
+                // degrade to the unstyled slot instead of aliasing an ID.
+                style_id as u32 + 1
+            } else {
+                // Invalid external palette references degrade to an unstyled
+                // cell instead of aliasing another style or ending iteration.
+                0
+            };
+            sparse_ids.insert(linear_index, range_style_id);
         }
 
         // Construct zero/style runs directly from sparse positions. Large gaps are
@@ -1111,7 +1135,7 @@ impl StyleRange {
         StyleRange {
             start: (row_start, col_start),
             end: (row_end, col_end),
-            palette,
+            palette: range_palette,
             runs,
             total_cells,
         }
@@ -1127,13 +1151,16 @@ impl StyleRange {
 
         // Build the compact palette first, then let from_style_ids construct runs
         // without allocating the full worksheet bounding rectangle.
-        let mut palette: Vec<Style> = vec![Style::default()];
-        let mut style_to_id: std::collections::HashMap<u32, u16> = std::collections::HashMap::new();
+        let mut palette: Vec<Style> = Vec::new();
+        let mut style_to_id: std::collections::HashMap<u32, usize> =
+            std::collections::HashMap::new();
         let mut style_cells = Vec::with_capacity(cells.len());
 
         for (row, column, style) in cells {
             if style.is_empty() {
-                style_cells.push((row, column, 0));
+                // Keep the cell in the bounds calculation while mapping it to
+                // the reserved gap/default entry in `from_style_ids`.
+                style_cells.push((row, column, usize::MAX));
                 continue;
             }
 
@@ -1145,20 +1172,19 @@ impl StyleRange {
                 if let Some(&id) = style_to_id.get(&excel_style_id) {
                     id
                 } else {
-                    let id = palette.len().min(u16::MAX as usize) as u16;
+                    let id = palette.len();
                     palette.push(style);
                     style_to_id.insert(excel_style_id, id);
                     id
                 }
             } else {
-                let id = palette.len().min(u16::MAX as usize) as u16;
+                let id = palette.len();
                 palette.push(style);
                 id
             };
-            style_cells.push((row, column, usize::from(style_id)));
+            style_cells.push((row, column, style_id));
         }
 
-        palette.shrink_to_fit();
         Self::from_style_ids(style_cells, palette)
     }
 
@@ -1220,7 +1246,7 @@ impl StyleRange {
     }
 
     /// Get style ID at a linear index using binary search on runs
-    fn style_id_at(&self, linear_idx: u64) -> Option<u16> {
+    fn style_id_at(&self, linear_idx: u64) -> Option<u32> {
         let mut offset = 0u64;
         for run in &self.runs {
             let run_end = offset + u64::from(run.count);
@@ -1456,6 +1482,31 @@ mod tests {
         assert_eq!(range.get((0, 0)), Some(&styled));
         assert_eq!(range.get((0, 1)), Some(&Style::default()));
         assert_eq!(range.get((1_048_575, 16_383)), Some(&styled));
+    }
+
+    #[test]
+    fn test_workbook_style_zero_does_not_fill_sparse_gaps() {
+        let style_zero = Style::new().with_font(Font::new().with_name("CellXfs 0".to_string()));
+        let range =
+            StyleRange::from_style_ids(vec![(3, 4, 0), (3, 6, 0)], vec![style_zero.clone()]);
+
+        assert_eq!(range.start(), Some((3, 4)));
+        assert_eq!(range.get((0, 0)), Some(&style_zero));
+        assert_eq!(range.get((0, 1)), Some(&Style::default()));
+        assert_eq!(range.get((0, 2)), Some(&style_zero));
+        assert_eq!(range.unique_style_count(), 1);
+    }
+
+    #[test]
+    fn test_workbook_style_ids_are_not_truncated_at_u16_max() {
+        let high_style_id = usize::from(u16::MAX);
+        let high_style = Style::new().with_font(Font::new().with_name("High ID".to_string()));
+        let mut palette = vec![Style::default(); high_style_id + 1];
+        palette[high_style_id] = high_style.clone();
+
+        let range = StyleRange::from_style_ids(vec![(0, 0, high_style_id)], palette);
+
+        assert_eq!(range.get((0, 0)), Some(&high_style));
     }
 
     #[test]

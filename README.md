@@ -1,26 +1,34 @@
 # calamine-styles
 
-A fork of [calamine](https://github.com/tafia/calamine) that adds **cell style parsing** for xlsx files — Font, Fill, Border, Alignment, and NumberFormat.
+A maintained fork of [calamine](https://github.com/tafia/calamine) that adds
+cell-style parsing for XLSX files: fonts, fills, borders, alignment, and number
+formats.
 
 ## Relationship to calamine
 
-This crate is API-compatible with `calamine` and re-exports everything from upstream. The key addition is the `StyleInfo` struct returned by `worksheet_range_with_style()`, which gives you:
+The package is published as `calamine-styles`, while its Rust library keeps the
+`calamine` crate name so existing source imports remain compatible. The current
+fork baseline is calamine 0.33; promotion is gated on rebasing the style delta
+onto the current upstream release and passing the full test matrix.
 
-- **Font**: bold, italic, underline, strikethrough, size, color, name
-- **Fill**: pattern type, foreground/background color
-- **Border**: left/right/top/bottom/diagonal style and color
-- **Alignment**: horizontal, vertical, wrap text, indent, text rotation
-- **NumberFormat**: format code string (e.g., `"#,##0.00"`, `"yyyy-mm-dd"`)
+The main addition is `StyleInfo`, returned by
+`worksheet_range_with_style()`:
+
+- Font: bold, italic, underline, strikethrough, size, color, and name
+- Fill: pattern type and foreground/background color
+- Border: side/diagonal style and color
+- Alignment: horizontal, vertical, wrapping, indent, and rotation
+- Number format: format-code string such as `#,##0.00` or `yyyy-mm-dd`
 
 ## Usage
 
 ```toml
 [dependencies]
-calamine-styles = { version = "0.1", features = ["dates"] }
+calamine = { package = "calamine-styles", version = "0.1", features = ["dates"] }
 ```
 
 ```rust
-use calamine_styles::{Reader, Xlsx, open_workbook};
+use calamine::{open_workbook, Reader, Xlsx};
 
 let mut excel: Xlsx<_> = open_workbook("file.xlsx").unwrap();
 let range = excel.worksheet_range("Sheet1").unwrap();
@@ -31,11 +39,15 @@ for row in range.rows() {
 
 ## Features
 
-Same as calamine:
+- `chrono` / `dates`: chrono date and time types
+- `picture`: raw picture data
 
-- `chrono` / `dates`: Adds support for chrono date/time types
-- `picture`: Adds support for reading picture data
+## Maintenance contract
+
+This fork does not claim current-upstream parity until the rebase and
+conformance work is complete. Releases require the declared MSRV, stable,
+beta, and nightly test lanes plus formatting, Clippy, and package validation.
 
 ## License
 
-MIT — same as upstream calamine.
+MIT, matching upstream calamine.

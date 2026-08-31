@@ -61,6 +61,53 @@ fn normalize_number_format_code(format_code: &str) -> String {
     normalized
 }
 
+/// Return the locale-independent built-in format code for an OOXML format ID.
+///
+/// IDs 23 through 36 (and several IDs above 49) are locale-reserved. Those
+/// callers retain the numeric ID with an empty code rather than being told the
+/// materially incorrect `General` format.
+fn builtin_number_format_code(format_id: u32) -> Option<&'static str> {
+    match format_id {
+        0 => Some("General"),
+        1 => Some("0"),
+        2 => Some("0.00"),
+        3 => Some("#,##0"),
+        4 => Some("#,##0.00"),
+        5 => Some("\"$\"#,##0_);(\"$\"#,##0)"),
+        6 => Some("\"$\"#,##0_);[Red](\"$\"#,##0)"),
+        7 => Some("\"$\"#,##0.00_);(\"$\"#,##0.00)"),
+        8 => Some("\"$\"#,##0.00_);[Red](\"$\"#,##0.00)"),
+        9 => Some("0%"),
+        10 => Some("0.00%"),
+        11 => Some("0.00E+00"),
+        12 => Some("# ?/?"),
+        13 => Some("# ??/??"),
+        14 => Some("mm-dd-yy"),
+        15 => Some("d-mmm-yy"),
+        16 => Some("d-mmm"),
+        17 => Some("mmm-yy"),
+        18 => Some("h:mm AM/PM"),
+        19 => Some("h:mm:ss AM/PM"),
+        20 => Some("h:mm"),
+        21 => Some("h:mm:ss"),
+        22 => Some("m/d/yy h:mm"),
+        37 => Some("#,##0 ;(#,##0)"),
+        38 => Some("#,##0 ;[Red](#,##0)"),
+        39 => Some("#,##0.00;(#,##0.00)"),
+        40 => Some("#,##0.00;[Red](#,##0.00)"),
+        41 => Some("_(* #,##0_);_(* (#,##0);_(* \"-\"_);_(@_)"),
+        42 => Some("_($* #,##0_);_($* (#,##0);_($* \"-\"_);_(@_)"),
+        43 => Some("_(* #,##0.00_);_(* (#,##0.00);_(* \"-\"??_);_(@_)"),
+        44 => Some("_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)"),
+        45 => Some("mm:ss"),
+        46 => Some("[h]:mm:ss"),
+        47 => Some("mmss.0"),
+        48 => Some("##0.0E+0"),
+        49 => Some("@"),
+        _ => None,
+    }
+}
+
 fn worksheet_column_span(
     min_column: u32,
     max_column: Option<u32>,
@@ -472,49 +519,13 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                         {
                                             let mut fmt_id_bytes = Vec::new();
                                             fmt_id_bytes.extend_from_slice(&a.value);
-                                            let format_code = match number_formats
-                                                .get(&fmt_id_bytes)
-                                            {
-                                                Some((_, exposed)) => exposed.clone(),
-                                                None => {
-                                                    // Use built-in format
-                                                    match num_fmt_id {
-                                                        0 => "General".to_string(),
-                                                        1 => "0".to_string(),
-                                                        2 => "0.00".to_string(),
-                                                        3 => "#,##0".to_string(),
-                                                        4 => "#,##0.00".to_string(),
-                                                        9 => "0%".to_string(),
-                                                        10 => "0.00%".to_string(),
-                                                        11 => "0.00E+00".to_string(),
-                                                        12 => "# ?/?".to_string(),
-                                                        13 => "# ??/??".to_string(),
-                                                        14 => "mm-dd-yy".to_string(),
-                                                        15 => "d-mmm-yy".to_string(),
-                                                        16 => "d-mmm".to_string(),
-                                                        17 => "mmm-yy".to_string(),
-                                                        18 => "h:mm AM/PM".to_string(),
-                                                        19 => "h:mm:ss AM/PM".to_string(),
-                                                        20 => "h:mm".to_string(),
-                                                        21 => "h:mm:ss".to_string(),
-                                                        22 => "m/d/yy h:mm".to_string(),
-                                                        37 => "#,##0 ;(#,##0)".to_string(),
-                                                        38 => "#,##0 ;[Red](#,##0)".to_string(),
-                                                        39 => "#,##0.00;(#,##0.00)".to_string(),
-                                                        40 => "#,##0.00;[Red](#,##0.00)".to_string(),
-                                                        41 => "_(* #,##0_);_(* (#,##0);_(* \"-\"_);_(@_)".to_string(),
-                                                        42 => "_($* #,##0_);_($* (#,##0);_($* \"-\"_);_(@_)".to_string(),
-                                                        43 => "_(* #,##0.00_);_(* (#,##0.00);_(* \"-\"??_);_(@_)".to_string(),
-                                                        44 => "_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)".to_string(),
-                                                        45 => "mm:ss".to_string(),
-                                                        46 => "[h]:mm:ss".to_string(),
-                                                        47 => "mmss.0".to_string(),
-                                                        48 => "##0.0E+0".to_string(),
-                                                        49 => "@".to_string(),
-                                                        _ => "General".to_string(),
-                                                    }
-                                                }
-                                            };
+                                            let format_code =
+                                                match number_formats.get(&fmt_id_bytes) {
+                                                    Some((_, exposed)) => exposed.clone(),
+                                                    None => builtin_number_format_code(num_fmt_id)
+                                                        .unwrap_or_default()
+                                                        .to_string(),
+                                                };
 
                                             use crate::style::NumberFormat;
                                             let number_format =
@@ -2160,7 +2171,7 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
         if len < 100_000 {
             cells.reserve(len as usize);
         }
-        while let Some(cell) = cell_reader.next_formula()? {
+        while let Some(cell) = cell_reader.next_formula_value_only()? {
             if !cell.val.is_empty() {
                 cells.push(cell);
             }
@@ -2173,196 +2184,7 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
     }
 
     fn worksheet_layout(&mut self, name: &str) -> Result<WorksheetLayout, XlsxError> {
-        let (_, path) = self
-            .sheets
-            .iter()
-            .find(|&(n, _)| n == name)
-            .ok_or_else(|| XlsxError::WorksheetNotFound(name.into()))?;
-
-        let mut xml = xml_reader(&mut self.zip, path)
-            .ok_or_else(|| XlsxError::WorksheetNotFound(name.into()))??;
-
-        let mut layout = WorksheetLayout::new();
-        let mut buf = Vec::with_capacity(1024);
-
-        loop {
-            buf.clear();
-            match xml.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"sheetFormatPr" => {
-                    // Parse default column width and row height
-                    for attr in e.attributes() {
-                        let attr = attr.map_err(XlsxError::XmlAttr)?;
-                        match attr.key.as_ref() {
-                            b"defaultColWidth" => {
-                                if let Ok(width_str) = xml.decoder().decode(&attr.value) {
-                                    if let Ok(width) = width_str.parse::<f64>() {
-                                        layout = layout.with_default_column_width(width);
-                                    }
-                                }
-                            }
-                            b"defaultRowHeight" => {
-                                if let Ok(height_str) = xml.decoder().decode(&attr.value) {
-                                    if let Ok(height) = height_str.parse::<f64>() {
-                                        layout = layout.with_default_row_height(height);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"cols" => {
-                    // Parse column definitions
-                    loop {
-                        buf.clear();
-                        match xml.read_event_into(&mut buf) {
-                            Ok(Event::Start(ref col_e))
-                                if col_e.local_name().as_ref() == b"col" =>
-                            {
-                                let mut col_info = None;
-                                let mut width = 0.0;
-                                let mut custom_width = false;
-                                let mut hidden = false;
-                                let mut best_fit = false;
-
-                                for attr in col_e.attributes() {
-                                    let attr = attr.map_err(XlsxError::XmlAttr)?;
-                                    match attr.key.as_ref() {
-                                        b"min" => {
-                                            if let Ok(min_str) = xml.decoder().decode(&attr.value) {
-                                                if let Ok(min_col) = min_str.parse::<u32>() {
-                                                    col_info = Some(min_col - 1);
-                                                    // Convert to 0-based
-                                                }
-                                            }
-                                        }
-                                        b"width" => {
-                                            if let Ok(width_str) = xml.decoder().decode(&attr.value)
-                                            {
-                                                if let Ok(w) = width_str.parse::<f64>() {
-                                                    width = w;
-                                                }
-                                            }
-                                        }
-                                        b"customWidth" => {
-                                            custom_width = attr.value.as_ref() != b"0";
-                                        }
-                                        b"hidden" => {
-                                            hidden = attr.value.as_ref() != b"0";
-                                        }
-                                        b"bestFit" => {
-                                            best_fit = attr.value.as_ref() != b"0";
-                                        }
-                                        _ => {}
-                                    }
-                                }
-
-                                if let Some(col) = col_info {
-                                    let column_width = ColumnWidth::new(col, width)
-                                        .with_custom_width(custom_width)
-                                        .with_hidden(hidden)
-                                        .with_best_fit(best_fit);
-                                    layout = layout.add_column_width(column_width);
-                                }
-                            }
-                            Ok(Event::End(ref end_e)) if end_e.local_name().as_ref() == b"cols" => {
-                                break;
-                            }
-                            Ok(Event::Eof) => return Err(XlsxError::XmlEof("cols")),
-                            Err(e) => return Err(XlsxError::Xml(e)),
-                            _ => {}
-                        }
-                    }
-                }
-                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"sheetData" => {
-                    // Parse row definitions
-                    loop {
-                        buf.clear();
-                        match xml.read_event_into(&mut buf) {
-                            Ok(Event::Start(ref row_e))
-                                if row_e.local_name().as_ref() == b"row" =>
-                            {
-                                let mut row_num = None;
-                                let mut height = 0.0;
-                                let mut custom_height = false;
-                                let mut hidden = false;
-                                let mut thick_top = false;
-                                let mut thick_bottom = false;
-
-                                for attr in row_e.attributes() {
-                                    let attr = attr.map_err(XlsxError::XmlAttr)?;
-                                    match attr.key.as_ref() {
-                                        b"r" => {
-                                            if let Ok(row_str) = xml.decoder().decode(&attr.value) {
-                                                if let Ok(r) = row_str.parse::<u32>() {
-                                                    row_num = Some(r - 1); // Convert to 0-based
-                                                }
-                                            }
-                                        }
-                                        b"ht" => {
-                                            if let Ok(height_str) =
-                                                xml.decoder().decode(&attr.value)
-                                            {
-                                                if let Ok(h) = height_str.parse::<f64>() {
-                                                    height = h;
-                                                }
-                                            }
-                                        }
-                                        b"customHeight" => {
-                                            custom_height = attr.value.as_ref() != b"0";
-                                        }
-                                        b"hidden" => {
-                                            hidden = attr.value.as_ref() != b"0";
-                                        }
-                                        b"thickTop" => {
-                                            thick_top = attr.value.as_ref() != b"0";
-                                        }
-                                        b"thickBot" => {
-                                            thick_bottom = attr.value.as_ref() != b"0";
-                                        }
-                                        _ => {}
-                                    }
-                                }
-
-                                // Only add row height if it's custom or has special properties
-                                if let Some(row) = row_num {
-                                    if custom_height
-                                        || hidden
-                                        || thick_top
-                                        || thick_bottom
-                                        || height > 0.0
-                                    {
-                                        let row_height = RowHeight::new(row, height)
-                                            .with_custom_height(custom_height)
-                                            .with_hidden(hidden)
-                                            .with_thick_top(thick_top)
-                                            .with_thick_bottom(thick_bottom);
-                                        layout = layout.add_row_height(row_height);
-                                    }
-                                }
-
-                                // Skip to the end of this row element
-                                xml.read_to_end_into(row_e.name(), &mut Vec::new())?;
-                            }
-                            Ok(Event::End(ref end_e))
-                                if end_e.local_name().as_ref() == b"sheetData" =>
-                            {
-                                break;
-                            }
-                            Ok(Event::Eof) => return Err(XlsxError::XmlEof("sheetData")),
-                            Err(e) => return Err(XlsxError::Xml(e)),
-                            _ => {}
-                        }
-                    }
-                    break; // We're done after processing sheetData
-                }
-                Ok(Event::Eof) => break,
-                Err(e) => return Err(XlsxError::Xml(e)),
-                _ => {}
-            }
-        }
-
-        Ok(layout)
+        Xlsx::worksheet_layout(self, name)
     }
 
     fn worksheets(&mut self) -> Vec<(String, Range<Data>)> {
@@ -2407,7 +2229,7 @@ impl<RS: Read + Seek> ReaderRef<RS> for Xlsx<RS> {
             HeaderRow::FirstNonEmptyRow => {
                 // the header row is the row of the first non-empty cell
                 loop {
-                    match cell_reader.next_cell() {
+                    match cell_reader.next_cell_value_only() {
                         Ok(Some(Cell {
                             val: DataRef::Empty,
                             ..
@@ -2421,7 +2243,7 @@ impl<RS: Read + Seek> ReaderRef<RS> for Xlsx<RS> {
             HeaderRow::Row(header_row_idx) => {
                 // If `header_row` is a row index, we only add non-empty cells after this index.
                 loop {
-                    match cell_reader.next_cell() {
+                    match cell_reader.next_cell_value_only() {
                         Ok(Some(Cell {
                             val: DataRef::Empty,
                             ..
@@ -2591,69 +2413,6 @@ fn get_row_and_optional_column(range: &[u8]) -> Result<(u32, Option<u32>), XlsxE
         .checked_sub(1)
         .ok_or(XlsxError::RangeWithoutRowComponent)?;
     Ok((row, col.checked_sub(1)))
-}
-
-/// attempts to read either a simple or richtext string
-pub(crate) fn read_string<RS>(
-    xml: &mut XlReader<'_, RS>,
-    closing: QName,
-) -> Result<Option<String>, XlsxError>
-where
-    RS: Read + Seek,
-{
-    let mut buf = Vec::with_capacity(1024);
-    let mut val_buf = Vec::with_capacity(1024);
-    let mut rich_buffer: Option<String> = None;
-    let mut is_phonetic_text = false;
-    loop {
-        buf.clear();
-        match xml.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"r" => {
-                if rich_buffer.is_none() {
-                    // use a buffer since richtext has multiples <r> and <t> for the same cell
-                    rich_buffer = Some(String::new());
-                }
-            }
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"rPh" => {
-                is_phonetic_text = true;
-            }
-            Ok(Event::End(e)) if e.name() == closing => {
-                if rich_buffer.is_none() {
-                    // An empty <s></s> element, without <t> or other
-                    // subelements, is treated as a valid empty string in Excel.
-                    rich_buffer = Some(String::new());
-                }
-
-                return Ok(rich_buffer);
-            }
-            Ok(Event::End(e)) if e.local_name().as_ref() == b"rPh" => {
-                is_phonetic_text = false;
-            }
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"t" && !is_phonetic_text => {
-                val_buf.clear();
-                let mut value = String::new();
-                loop {
-                    match xml.read_event_into(&mut val_buf)? {
-                        Event::Text(t) => value.push_str(&unescape_xml(&t.xml10_content()?)),
-                        Event::GeneralRef(e) => unescape_entity_to_buffer(&e, &mut value)?,
-                        Event::End(end) if end.name() == e.name() => break,
-                        Event::Eof => return Err(XlsxError::XmlEof("t")),
-                        _ => (),
-                    }
-                }
-                if let Some(s) = &mut rich_buffer {
-                    s.push_str(&value);
-                } else {
-                    // consume any remaining events up to expected closing tag
-                    xml.read_to_end_into(closing, &mut val_buf)?;
-                    return Ok(Some(value));
-                }
-            }
-            Ok(Event::Eof) => return Err(XlsxError::XmlEof("")),
-            Err(e) => return Err(XlsxError::Xml(e)),
-            _ => (),
-        }
-    }
 }
 
 /// Result of parsing run properties - includes both the font and whether there's "rich" formatting
@@ -2866,18 +2625,7 @@ fn parse_run_color(
                 // Indexed colors
                 let idx_str = String::from_utf8_lossy(&attr.value);
                 if let Ok(idx) = idx_str.parse::<u8>() {
-                    let color = match idx {
-                        1 => Color::rgb(0, 0, 0),
-                        2 => Color::rgb(255, 255, 255),
-                        3 => Color::rgb(255, 0, 0),
-                        4 => Color::rgb(0, 255, 0),
-                        5 => Color::rgb(0, 0, 255),
-                        6 => Color::rgb(255, 255, 0),
-                        7 => Color::rgb(255, 0, 255),
-                        8 => Color::rgb(0, 255, 255),
-                        _ => Color::rgb(0, 0, 0),
-                    };
-                    return Ok(Some(color));
+                    return Ok(Some(style_parser::get_indexed_color(idx)));
                 }
             }
             _ => {}
@@ -4035,9 +3783,41 @@ impl<'a, RS: Read + Seek + 'a> Iterator for PivotCacheIter<'a, RS> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Cursor, Write};
     use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+
+    fn workbook_with_sheet(
+        sheet_xml: &[u8],
+        styles: Vec<Style>,
+        formats: Vec<CellFormat>,
+    ) -> Xlsx<Cursor<Vec<u8>>> {
+        let cursor = Cursor::new(Vec::new());
+        let mut zip_writer = ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip_writer
+            .start_file("xl/worksheets/sheet1.xml", options)
+            .unwrap();
+        zip_writer.write_all(sheet_xml).unwrap();
+        let mut cursor = zip_writer.finish().unwrap();
+        cursor.set_position(0);
+
+        Xlsx {
+            zip: ZipArchive::new(cursor).unwrap(),
+            strings: Vec::new(),
+            sheets: vec![("Sheet1".to_string(), "xl/worksheets/sheet1.xml".to_string())],
+            tables: None,
+            formats,
+            styles,
+            is_1904: false,
+            metadata: Metadata::default(),
+            #[cfg(feature = "picture")]
+            pictures: None,
+            merged_regions: None,
+            options: XlsxOptions::default(),
+        }
+    }
 
     #[test]
     fn test_dimensions() {
@@ -4477,6 +4257,20 @@ mod tests {
     }
 
     #[test]
+    fn test_builtin_number_formats_do_not_fall_back_to_general() {
+        assert_eq!(
+            builtin_number_format_code(5),
+            Some("\"$\"#,##0_);(\"$\"#,##0)")
+        );
+        assert_eq!(
+            builtin_number_format_code(8),
+            Some("\"$\"#,##0.00_);[Red](\"$\"#,##0.00)")
+        );
+        assert_eq!(builtin_number_format_code(23), None);
+        assert_eq!(builtin_number_format_code(164), None);
+    }
+
+    #[test]
     fn test_grouped_column_span_is_inclusive_and_bounded() {
         assert_eq!(
             worksheet_column_span(2, Some(5))
@@ -4487,6 +4281,78 @@ mod tests {
         assert!(worksheet_column_span(0, Some(1)).is_err());
         assert!(worksheet_column_span(5, Some(4)).is_err());
         assert!(worksheet_column_span(1, Some(MAX_COLUMNS + 1)).is_err());
+    }
+
+    #[test]
+    fn test_reader_trait_layout_delegates_to_inherent_parser() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetFormatPr defaultColWidth="8.5" defaultRowHeight="15"/>
+  <cols><col min="2" max="5" width="20" customWidth="1"/></cols>
+  <sheetData></sheetData>
+</worksheet>"#;
+        let mut workbook = workbook_with_sheet(sheet_xml, Vec::new(), Vec::new());
+
+        let layout = Reader::worksheet_layout(&mut workbook, "Sheet1").unwrap();
+        assert_eq!(layout.default_column_width, Some(8.5));
+        assert_eq!(layout.default_row_height, Some(15.0));
+        assert_eq!(layout.column_widths.len(), 4);
+        for column in 1..=4 {
+            let width = layout.get_column_width(column).unwrap();
+            assert_eq!(width.width, 20.0);
+            assert!(width.custom_width);
+        }
+    }
+
+    #[test]
+    fn test_value_only_reader_avoids_styles_but_streaming_reader_retains_them() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData><row r="1"><c r="A1" s="0" t="inlineStr"><is><t>value</t></is></c></row></sheetData>
+</worksheet>"#;
+        let style = Style::new().with_font(Font::new().with_name("heap-backed-font".repeat(64)));
+
+        let mut streaming_workbook =
+            workbook_with_sheet(sheet_xml, vec![style.clone()], vec![CellFormat::Other]);
+        let mut streaming_reader = streaming_workbook.worksheet_cells_reader("Sheet1").unwrap();
+        assert!(streaming_reader.next_cell().unwrap().unwrap().has_style());
+
+        let mut range_workbook =
+            workbook_with_sheet(sheet_xml, vec![style], vec![CellFormat::Other]);
+        let mut range_reader = range_workbook.worksheet_cells_reader("Sheet1").unwrap();
+        assert!(!range_reader
+            .next_cell_value_only()
+            .unwrap()
+            .unwrap()
+            .has_style());
+    }
+
+    #[test]
+    fn test_inline_string_preserves_rich_text_and_zero_based_indexed_color() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is>
+        <r><rPr><b/><color indexed="2"/></rPr><t>Red</t></r>
+        <r><t> text</t></r>
+      </is></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+        let mut workbook = workbook_with_sheet(sheet_xml, Vec::new(), Vec::new());
+        let range = workbook.worksheet_range_ref("Sheet1").unwrap();
+
+        match range.get((0, 0)) {
+            Some(DataRef::RichText(rich_text)) => {
+                assert_eq!(rich_text.plain_text(), "Red text");
+                assert_eq!(rich_text.runs.len(), 2);
+                let font = rich_text.runs[0].font.as_ref().unwrap();
+                assert!(font.is_bold());
+                assert_eq!(font.color, Some(crate::Color::rgb(255, 0, 0)));
+            }
+            value => panic!("inline rich text was not preserved: {value:?}"),
+        }
     }
 
     #[test]

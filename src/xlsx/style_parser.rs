@@ -816,7 +816,8 @@ pub fn parse_protection<RS: BufRead>(
     _xml: &mut Reader<RS>,
     start_elem: &BytesStart,
 ) -> Result<Protection, XlsxError> {
-    // CT_CellProtection defaults `locked` to true and `hidden` to false.
+    // Excel interprets omitted protection attributes as `locked=true` and
+    // `hidden=false`, even though CT_CellProtection declares no schema default.
     let mut protection = Protection::new().with_locked(true);
 
     for attr in start_elem.attributes() {
@@ -1048,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    fn protection_uses_ooxml_locked_default_and_boolean_values() {
+    fn protection_uses_excel_locked_default_and_ooxml_boolean_values() {
         let protection = parse_protection_xml(br#"<protection hidden="1"/>"#).unwrap();
         assert!(protection.locked);
         assert!(protection.hidden);

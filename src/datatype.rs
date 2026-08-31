@@ -418,6 +418,8 @@ pub enum DataRef<'a> {
     SharedString(&'a str),
     /// Shared Rich Text (reference to rich text in shared strings table)
     SharedRichText(&'a RichText),
+    /// Owned Rich Text (used by inline strings)
+    RichText(RichText),
     /// Boolean
     Bool(bool),
     /// Date or Time
@@ -453,12 +455,15 @@ impl DataType for DataRef<'_> {
     fn is_string(&self) -> bool {
         matches!(
             *self,
-            DataRef::String(_) | DataRef::SharedString(_) | DataRef::SharedRichText(_)
+            DataRef::String(_)
+                | DataRef::SharedString(_)
+                | DataRef::SharedRichText(_)
+                | DataRef::RichText(_)
         )
     }
 
     fn is_rich_text(&self) -> bool {
-        matches!(*self, DataRef::SharedRichText(_))
+        matches!(*self, DataRef::SharedRichText(_) | DataRef::RichText(_))
     }
 
     fn is_duration_iso(&self) -> bool {
@@ -512,6 +517,7 @@ impl DataType for DataRef<'_> {
     fn get_rich_text(&self) -> Option<&RichText> {
         match self {
             DataRef::SharedRichText(rt) => Some(rt),
+            DataRef::RichText(rt) => Some(rt),
             _ => None,
         }
     }
@@ -551,6 +557,7 @@ impl DataType for DataRef<'_> {
             DataRef::String(v) => Some(v.clone()),
             DataRef::SharedString(v) => Some(v.to_string()),
             DataRef::SharedRichText(v) => Some(v.plain_text()),
+            DataRef::RichText(v) => Some(v.plain_text()),
             _ => None,
         }
     }
@@ -759,6 +766,7 @@ impl<'a> From<DataRef<'a>> for Data {
             DataRef::String(v) => Data::String(v),
             DataRef::SharedString(v) => Data::String(v.into()),
             DataRef::SharedRichText(v) => Data::RichText(v.clone()),
+            DataRef::RichText(v) => Data::RichText(v),
             DataRef::Bool(v) => Data::Bool(v),
             DataRef::DateTime(v) => Data::DateTime(v),
             DataRef::DateTimeIso(v) => Data::DateTimeIso(v),

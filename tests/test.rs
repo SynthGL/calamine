@@ -2728,7 +2728,10 @@ fn test_border_colors() {
                 if let Some(borders) = &style.borders {
                     // Check each border side for styles and colors
                     for border in [&borders.left, &borders.right, &borders.top, &borders.bottom] {
-                        if border.style != BorderStyle::None && border.color.is_some() {
+                        if border.style == BorderStyle::None {
+                            continue;
+                        }
+                        if let Some(color) = border.color {
                             match border.style {
                                 BorderStyle::Thin => {
                                     found_thin_with_color = true;
@@ -2740,7 +2743,6 @@ fn test_border_colors() {
                             }
 
                             // Verify the color is red as expected
-                            let color = border.color.unwrap();
                             assert_eq!(color.red, 255, "Expected red color component to be 255");
                             assert_eq!(color.green, 0, "Expected green color component to be 0");
                             assert_eq!(color.blue, 0, "Expected blue color component to be 0");
@@ -2776,16 +2778,8 @@ fn test_problematic_formats() {
         .get_font()
         .expect("A1 should have font information");
 
-    // Verify font properties - check what we actually have
-    if a1_font.name.is_none() {
-        // If no font name, that might be expected for some Excel files
-        // Just verify we can read the font without panicking
-        assert!(true, "Font parsing works even without explicit name");
-    }
-    if a1_font.size.is_none() {
-        // If no font size, that might be expected for some Excel files
-        assert!(true, "Font parsing works even without explicit size");
-    }
+    // Optional font name and size fields may legitimately be absent. Reaching this
+    // point verifies that the style and font records were parsed successfully.
 
     // Check font color - should be white
     if let Some(color) = a1_font.color {

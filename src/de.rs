@@ -686,6 +686,10 @@ impl<'a, 'de> serde::Deserializer<'de> for DataDeserializer<'a> {
     {
         match self.data_type {
             Data::String(v) => visitor.visit_bytes(v.as_bytes()),
+            Data::RichText(v) => {
+                let text = v.plain_text();
+                visitor.visit_bytes(text.as_bytes())
+            }
             Data::Empty => visitor.visit_bytes(&[]),
             Data::Error(err) => Err(DeError::CellError {
                 err: err.clone(),
@@ -746,14 +750,32 @@ impl<'a, 'de> serde::Deserializer<'de> for DataDeserializer<'a> {
         V: Visitor<'de>,
     {
         match self.data_type {
-            Data::String(s) if s.len() == 1 => {
-                visitor.visit_char(s.chars().next().expect("s not empty"))
+            Data::String(text) => {
+                let mut characters = text.chars();
+                match (characters.next(), characters.next()) {
+                    (Some(character), None) => visitor.visit_char(character),
+                    _ => Err(DeError::Custom(format!(
+                        "Expecting char, got {:?}",
+                        self.data_type
+                    ))),
+                }
+            }
+            Data::RichText(rich_text) => {
+                let text = rich_text.plain_text();
+                let mut characters = text.chars();
+                match (characters.next(), characters.next()) {
+                    (Some(character), None) => visitor.visit_char(character),
+                    _ => Err(DeError::Custom(format!(
+                        "Expecting char, got {:?}",
+                        self.data_type
+                    ))),
+                }
             }
             Data::Error(err) => Err(DeError::CellError {
                 err: err.clone(),
                 pos: self.pos,
             }),
-            d => Err(DeError::Custom(format!("Expecting unit, got {d:?}"))),
+            d => Err(DeError::Custom(format!("Expecting char, got {d:?}"))),
         }
     }
 
@@ -805,6 +827,9 @@ impl<'a, 'de> serde::Deserializer<'de> for DataDeserializer<'a> {
 
         match self.data_type {
             Data::String(s) => visitor.visit_enum(s.as_str().into_deserializer()),
+            Data::RichText(rich_text) => {
+                visitor.visit_enum(rich_text.plain_text().into_deserializer())
+            }
             Data::Error(err) => Err(DeError::CellError {
                 err: err.clone(),
                 pos: self.pos,
@@ -831,6 +856,27 @@ impl<'a, 'de> serde::Deserializer<'de> for DataDeserializer<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt;
+
+    use serde::de::Visitor;
+
+    struct BytesVisitor;
+
+    impl<'de> Visitor<'de> for BytesVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a byte sequence")
+        }
+
+        fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_vec())
+        }
+    }
+
     #[test]
     fn test_deserialize_enum() {
         use crate::ToCellDeserializer;
@@ -879,6 +925,60 @@ mod tests {
         assert_eq!(
             f32::deserialize(float.to_cell_deserializer((0, 0))).unwrap(),
             -12.5
+        );
+    }
+
+    #[test]
+    fn test_deserialize_string_compatible_values_from_rich_text_plain_value() {
+        use crate::{RichText, TextRun, ToCellDeserializer};
+        use serde::Deserialize;
+
+        #[derive(Debug, serde_derive::Deserialize, PartialEq)]
+        enum Content {
+            Foo,
+        }
+
+        let plain_character = super::Data::String("é".to_string());
+        assert_eq!(
+            char::deserialize(plain_character.to_cell_deserializer((0, 0))).unwrap(),
+            'é'
+        );
+
+        let character =
+            super::Data::RichText(RichText::from_runs(vec![TextRun::new("é".to_string())]));
+        assert_eq!(
+            char::deserialize(character.to_cell_deserializer((0, 0))).unwrap(),
+            'é'
+        );
+
+        let text = super::Data::RichText(RichText::from_runs(vec![
+            TextRun::new("for".to_string()),
+            TextRun::new("matted".to_string()),
+        ]));
+        assert_eq!(
+            serde::Deserializer::deserialize_bytes(
+                text.to_cell_deserializer((0, 0)),
+                BytesVisitor,
+            )
+            .unwrap(),
+            b"formatted"
+        );
+        assert_eq!(
+            serde::Deserializer::deserialize_byte_buf(
+                text.to_cell_deserializer((0, 0)),
+                BytesVisitor,
+            )
+            .unwrap(),
+            b"formatted"
+        );
+
+        let variant = super::Data::RichText(RichText::from_runs(vec![
+            TextRun::new("F".to_string()),
+            TextRun::new("oo".to_string()),
+        ]));
+        assert_eq!(
+            Content::deserialize(variant.to_cell_deserializer((0, 0))).unwrap(),
+            Content::Foo
         );
     }
 }

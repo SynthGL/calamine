@@ -202,6 +202,36 @@ fn worksheet_column_span(
     Ok((min_column - 1)..=(max_column - 1))
 }
 
+fn compact_worksheet_style_palette(
+    cells: &mut [(u32, u32, usize)],
+    workbook_palette: &[Style],
+) -> Vec<Style> {
+    let mut workbook_to_worksheet = HashMap::new();
+    let mut worksheet_palette = Vec::new();
+
+    for (_, _, style_id) in cells {
+        let workbook_style_id = *style_id;
+        let worksheet_style_id =
+            if let Some(&worksheet_style_id) = workbook_to_worksheet.get(&workbook_style_id) {
+                worksheet_style_id
+            } else if let Some(style) = workbook_palette.get(workbook_style_id) {
+                let worksheet_style_id = worksheet_palette.len();
+                worksheet_palette.push(style.clone());
+                workbook_to_worksheet.insert(workbook_style_id, worksheet_style_id);
+                worksheet_style_id
+            } else {
+                // The streaming reader currently filters invalid IDs. Keep this
+                // helper defensive so a future caller cannot alias one to a valid
+                // compact palette entry.
+                usize::MAX
+            };
+
+        *style_id = worksheet_style_id;
+    }
+
+    worksheet_palette
+}
+
 /// An enum for Xlsx specific errors.
 #[derive(Debug)]
 pub enum XlsxError {
@@ -696,62 +726,96 @@ impl<RS: Read + Seek> Xlsx<RS> {
                             // Parse the style by building it from referenced components
                             let mut style = Style::new();
                             let mut num_fmt_id_bytes: Option<Vec<u8>> = None;
+                            let mut font_id = None;
+                            let mut fill_id = None;
+                            let mut border_id = None;
+                            // Preserve the historical behavior when an apply flag
+                            // is omitted, but honor an explicit false value.
+                            let mut apply_font = true;
+                            let mut apply_fill = true;
+                            let mut apply_border = true;
+                            let mut apply_number_format = true;
+                            let mut apply_alignment = true;
+                            let mut apply_protection = true;
 
                             // Parse attributes to get references to fonts, fills, borders
                             for a in e.attributes() {
                                 let a = a?;
                                 match a.key.as_ref() {
                                     b"fontId" => {
-                                        if let Ok(font_id) =
-                                            xml.decoder().decode(&a.value)?.parse::<usize>()
-                                        {
-                                            if let Some(font) = fonts.get(font_id) {
-                                                style = style.with_font(font.clone());
-                                            }
-                                        }
+                                        font_id =
+                                            xml.decoder().decode(&a.value)?.parse::<usize>().ok();
                                     }
                                     b"fillId" => {
-                                        if let Ok(fill_id) =
-                                            xml.decoder().decode(&a.value)?.parse::<usize>()
-                                        {
-                                            if let Some(fill) = fills.get(fill_id) {
-                                                style = style.with_fill(fill.clone());
-                                            }
-                                        }
+                                        fill_id =
+                                            xml.decoder().decode(&a.value)?.parse::<usize>().ok();
                                     }
                                     b"borderId" => {
-                                        if let Ok(border_id) =
-                                            xml.decoder().decode(&a.value)?.parse::<usize>()
-                                        {
-                                            if let Some(border) = borders.get(border_id) {
-                                                style = style.with_borders(border.clone());
-                                            }
-                                        }
+                                        border_id =
+                                            xml.decoder().decode(&a.value)?.parse::<usize>().ok();
                                     }
                                     b"numFmtId" => {
-                                        // Store for both Style and CellFormat
+                                        // Store for both Style and CellFormat after
+                                        // applyNumberFormat has been considered.
                                         num_fmt_id_bytes = Some(a.value.to_vec());
-
-                                        if let Ok(num_fmt_id) =
-                                            xml.decoder().decode(&a.value)?.parse::<u32>()
-                                        {
-                                            let mut fmt_id_bytes = Vec::new();
-                                            fmt_id_bytes.extend_from_slice(&a.value);
-                                            let format_code =
-                                                match number_formats.get(&fmt_id_bytes) {
-                                                    Some((_, exposed)) => exposed.clone(),
-                                                    None => builtin_number_format_code(num_fmt_id)
-                                                        .unwrap_or_default()
-                                                        .to_string(),
-                                                };
-
-                                            use crate::style::NumberFormat;
-                                            let number_format =
-                                                NumberFormat::new(format_code).with_id(num_fmt_id);
-                                            style = style.with_number_format(number_format);
-                                        }
+                                    }
+                                    b"applyFont" => {
+                                        apply_font = style_parser::parse_ooxml_bool(&a.value)?;
+                                    }
+                                    b"applyFill" => {
+                                        apply_fill = style_parser::parse_ooxml_bool(&a.value)?;
+                                    }
+                                    b"applyBorder" => {
+                                        apply_border = style_parser::parse_ooxml_bool(&a.value)?;
+                                    }
+                                    b"applyNumberFormat" => {
+                                        apply_number_format =
+                                            style_parser::parse_ooxml_bool(&a.value)?;
+                                    }
+                                    b"applyAlignment" => {
+                                        apply_alignment = style_parser::parse_ooxml_bool(&a.value)?;
+                                    }
+                                    b"applyProtection" => {
+                                        apply_protection =
+                                            style_parser::parse_ooxml_bool(&a.value)?;
                                     }
                                     _ => {}
+                                }
+                            }
+
+                            if apply_font {
+                                if let Some(font) = font_id.and_then(|id| fonts.get(id)) {
+                                    style = style.with_font(font.clone());
+                                }
+                            }
+                            if apply_fill {
+                                if let Some(fill) = fill_id.and_then(|id| fills.get(id)) {
+                                    style = style.with_fill(fill.clone());
+                                }
+                            }
+                            if apply_border {
+                                if let Some(border) = border_id.and_then(|id| borders.get(id)) {
+                                    style = style.with_borders(border.clone());
+                                }
+                            }
+
+                            let num_fmt_id_bytes =
+                                apply_number_format.then_some(num_fmt_id_bytes).flatten();
+                            if let Some(id_bytes) = num_fmt_id_bytes.as_ref() {
+                                if let Ok(num_fmt_id) =
+                                    xml.decoder().decode(id_bytes)?.parse::<u32>()
+                                {
+                                    let format_code = match number_formats.get(id_bytes) {
+                                        Some((_, exposed)) => exposed.clone(),
+                                        None => builtin_number_format_code(num_fmt_id)
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                    };
+
+                                    use crate::style::NumberFormat;
+                                    let number_format =
+                                        NumberFormat::new(format_code).with_id(num_fmt_id);
+                                    style = style.with_number_format(number_format);
                                 }
                             }
 
@@ -767,12 +831,16 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                         b"alignment" => {
                                             let alignment =
                                                 style_parser::parse_alignment(&mut xml, nested_e)?;
-                                            style = style.with_alignment(alignment);
+                                            if apply_alignment {
+                                                style = style.with_alignment(alignment);
+                                            }
                                         }
                                         b"protection" => {
                                             let protection =
                                                 style_parser::parse_protection(&mut xml, nested_e)?;
-                                            style = style.with_protection(protection);
+                                            if apply_protection {
+                                                style = style.with_protection(protection);
+                                            }
                                         }
                                         _ => {
                                             // Skip unknown nested elements
@@ -2088,8 +2156,9 @@ impl<RS: Read + Seek> Xlsx<RS> {
             cells.push((row, col, style_id));
         }
 
-        // Get the palette from the cell_reader (clone once, not per cell)
-        let palette = cell_reader.styles().to_vec();
+        // Retain only styles referenced by this sheet. Each used workbook style
+        // is cloned once, then all cells refer to its compact sheet-local ID.
+        let palette = compact_worksheet_style_palette(&mut cells, cell_reader.styles());
 
         Ok(StyleRange::from_style_ids(cells, palette))
     }
@@ -4482,6 +4551,83 @@ mod tests {
     }
 
     #[test]
+    fn test_cell_xf_apply_flags_suppress_explicitly_disabled_components() {
+        let styles_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts>
+  <fonts count="2"><font/><font><b/></font></fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill>
+  </fills>
+  <borders count="2"><border/><border><left style="thin"/></border></borders>
+  <cellXfs count="2">
+    <xf numFmtId="164" fontId="1" fillId="1" borderId="1"
+        applyNumberFormat="0" applyFont="false" applyFill="0" applyBorder="false"
+        applyAlignment="0" applyProtection="false">
+      <alignment horizontal="center"/>
+      <protection hidden="1"/>
+    </xf>
+    <xf numFmtId="164" fontId="1" fillId="1" borderId="1"
+        applyNumberFormat="1" applyFont="true" applyFill="1" applyBorder="true"
+        applyAlignment="1" applyProtection="true">
+      <alignment horizontal="center"/>
+      <protection hidden="1"/>
+    </xf>
+  </cellXfs>
+</styleSheet>"#;
+        let cursor = Cursor::new(Vec::new());
+        let mut zip_writer = ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip_writer.start_file("xl/styles.xml", options).unwrap();
+        zip_writer.write_all(styles_xml).unwrap();
+        let mut cursor = zip_writer.finish().unwrap();
+        cursor.set_position(0);
+
+        let mut workbook = Xlsx {
+            zip: ZipArchive::new(cursor).unwrap(),
+            strings: Vec::new(),
+            sheets: Vec::new(),
+            tables: None,
+            formats: Vec::new(),
+            styles: Vec::new(),
+            theme_colors: style_parser::DEFAULT_THEME_COLORS,
+            indexed_colors: Box::new(style_parser::NO_INDEXED_COLOR_OVERRIDES),
+            is_1904: false,
+            metadata: Metadata::default(),
+            #[cfg(feature = "picture")]
+            pictures: None,
+            merged_regions: None,
+            options: XlsxOptions::default(),
+        };
+
+        workbook.read_styles().unwrap();
+        assert_eq!(workbook.styles.len(), 2);
+        assert!(workbook.styles[0].is_empty());
+        assert_eq!(workbook.formats[0], CellFormat::Other);
+
+        let applied = &workbook.styles[1];
+        assert!(applied.font.as_ref().unwrap().is_bold());
+        assert_eq!(
+            applied.fill.as_ref().unwrap().foreground_color,
+            Some(crate::Color::rgb(255, 0, 0))
+        );
+        assert_eq!(
+            applied.borders.as_ref().unwrap().left.style,
+            crate::BorderStyle::Thin
+        );
+        assert_eq!(applied.number_format.as_ref().unwrap().format_id, Some(164));
+        assert_eq!(
+            applied.alignment.as_ref().unwrap().horizontal,
+            crate::HorizontalAlignment::Center
+        );
+        assert!(applied.protection.as_ref().unwrap().locked);
+        assert!(applied.protection.as_ref().unwrap().hidden);
+        assert_eq!(workbook.formats[1], CellFormat::DateTime);
+    }
+
+    #[test]
     fn test_custom_theme_colors_feed_style_and_rich_text_parsers() {
         let theme_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
 <a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
@@ -4799,6 +4945,59 @@ mod tests {
             assert_eq!(width.width, 20.0);
             assert!(width.custom_width);
         }
+    }
+
+    #[test]
+    fn test_worksheet_style_compacts_workbook_palette() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData><row r="1"><c r="A1" s="3"></c><c r="C1" s="1"></c><c r="E1" s="3"></c></row></sheetData>
+</worksheet>"#;
+        let named_style =
+            |name: &str| Style::new().with_font(Font::new().with_name(name.to_string()));
+        let workbook_styles = vec![
+            Style::default(),
+            named_style("used-one"),
+            named_style("unused-two"),
+            named_style("used-three"),
+        ];
+        let mut workbook = workbook_with_sheet(sheet_xml, workbook_styles, Vec::new());
+
+        let styles = workbook.worksheet_style("Sheet1").unwrap();
+
+        assert_eq!(styles.unique_style_count(), 2);
+        assert_eq!(
+            styles
+                .get((0, 0))
+                .unwrap()
+                .get_font()
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("used-three")
+        );
+        assert!(styles.get((0, 1)).unwrap().is_empty());
+        assert_eq!(
+            styles
+                .get((0, 2))
+                .unwrap()
+                .get_font()
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("used-one")
+        );
+        assert!(styles.get((0, 3)).unwrap().is_empty());
+        assert_eq!(
+            styles
+                .get((0, 4))
+                .unwrap()
+                .get_font()
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("used-three")
+        );
     }
 
     #[test]

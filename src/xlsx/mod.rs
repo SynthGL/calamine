@@ -1930,9 +1930,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                 }
 
                                 if let Some(min_column) = min_column {
-                                    for column in
-                                        worksheet_column_span(min_column, max_column)?
-                                    {
+                                    for column in worksheet_column_span(min_column, max_column)? {
                                         let column_width = ColumnWidth::new(column, width)
                                             .with_custom_width(custom_width)
                                             .with_hidden(hidden)
@@ -4481,7 +4479,9 @@ mod tests {
     #[test]
     fn test_grouped_column_span_is_inclusive_and_bounded() {
         assert_eq!(
-            worksheet_column_span(2, Some(5)).unwrap().collect::<Vec<_>>(),
+            worksheet_column_span(2, Some(5))
+                .unwrap()
+                .collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
         );
         assert!(worksheet_column_span(0, Some(1)).is_err());

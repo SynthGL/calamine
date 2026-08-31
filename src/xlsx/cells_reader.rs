@@ -495,14 +495,12 @@ where
                         (self.row_index, self.col_index)
                     };
 
-                    // Extract style ID if present (no clone needed!)
-                    let style_id = if let Ok(Some(style_id_str)) =
-                        get_attribute(c_element.attributes(), QName(b"s"))
-                    {
-                        atoi_simd::parse::<usize>(style_id_str).unwrap_or(0)
-                    } else {
-                        0
-                    };
+                    // Keep the attribute's presence separate from its numeric
+                    // value: cellXfs index zero is a real style, while an
+                    // omitted `s` attribute means the cell has no explicit
+                    // style reference.
+                    let style_id = get_attribute(c_element.attributes(), QName(b"s"))?
+                        .and_then(|style_id| atoi_simd::parse::<usize>(style_id).ok());
 
                     // Skip the cell content since we only care about the style ID
                     loop {
@@ -516,8 +514,8 @@ where
                     }
                     self.col_index += 1;
 
-                    // Only return cells with actual styles
-                    if style_id > 0 && style_id < self.styles.len() {
+                    // Only return cells with explicit, valid style references.
+                    if let Some(style_id) = style_id.filter(|id| *id < self.styles.len()) {
                         return Ok(Some((pos.0, pos.1, style_id)));
                     }
                     // Continue to next cell if no style

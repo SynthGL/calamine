@@ -1,337 +1,179 @@
-# Style Reading Support in Calamine
+# Style reading in Calamine
 
-This document describes the style extraction functionality in calamine for reading style information from Excel files.
+Calamine exposes the cell formatting stored in an XLSX workbook through
+`Reader::worksheet_style()`. The method returns a `StyleRange`: a compact,
+run-length-encoded view of the explicit cell styles on one worksheet.
 
-## Overview
+Value ranges and style ranges are separate. `worksheet_range()` returns cell
+values; its cells do not contain styles. Use `worksheet_style()` when you need
+formatting, and `worksheet_range()` separately when you also need values.
 
-Calamine supports extracting style information from Excel files, including:
-- Font properties (name, size, weight, color, etc.)
-- Fill properties (background colors, patterns)
-- Border properties (style, color, position)
-- Alignment properties (horizontal, vertical, text rotation, etc.)
-- Protection properties (locked, hidden)
+## Reading worksheet styles
 
-## Data Structures
+```rust,no_run
+use calamine::{open_workbook, Xlsx};
 
-When reading styles from Excel files, you'll work with these data structures:
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut workbook: Xlsx<_> = open_workbook("file.xlsx")?;
+    let styles = workbook.worksheet_style("Sheet1")?;
 
-### Color
-```rust
-// Colors are returned when reading style information
-// You can check color properties like:
-if let Some(color) = font.color {
-    let (r, g, b, a) = color.rgba();
-    println!("Color RGBA: {}, {}, {}, {}", r, g, b, a);
-}
-```
+    println!("distinct worksheet styles: {}", styles.unique_style_count());
+    println!("RLE runs: {}", styles.run_count());
 
-### Font
-```rust
-// Font information extracted from Excel files
-if let Some(font) = style.get_font() {
-    // Access font properties
-    if let Some(name) = &font.name {
-        println!("Font name: {}", name);
-    }
-    if let Some(size) = font.size {
-        println!("Font size: {}", size);
-    }
-    println!("Bold: {}", font.is_bold());
-    println!("Italic: {}", font.is_italic());
-    if let Some(color) = font.color {
-        println!("Font color: {}", color);
-    }
-}
-```
+    if let Some((start_row, start_column)) = styles.start() {
+        for (row_offset, column_offset, style) in styles.cells() {
+            if !style.has_visible_properties() {
+                continue;
+            }
 
-### Fill
-```rust
-// Fill information extracted from Excel files
-if let Some(fill) = style.get_fill() {
-    if fill.is_visible() {
-        println!("Cell has background fill");
-        if let Some(color) = fill.get_color() {
-            println!("Fill color: {}", color);
-        }
-        if let Some(pattern) = fill.pattern {
-            println!("Fill pattern: {:?}", pattern);
+            // StyleRange iterator coordinates are relative to its start.
+            let row = start_row + row_offset as u32;
+            let column = start_column + column_offset as u32;
+            println!("styled cell at ({row}, {column}): {style:?}");
         }
     }
+
+    Ok(())
 }
 ```
 
-### Borders
-```rust
-// Border information extracted from Excel files
-if let Some(borders) = style.get_borders() {
-    if borders.has_visible_borders() {
-        println!("Cell has borders");
-        if borders.left.is_visible() {
-            println!("Left border style: {:?}", borders.left.style);
-            if let Some(color) = borders.left.color {
-                println!("Left border color: {}", color);
+`StyleRange::start()` and `StyleRange::end()` are absolute, zero-based worksheet
+coordinates. `StyleRange::get()` and the coordinates returned by
+`StyleRange::cells()` are relative to `start()`. Sparse gaps inside the bounding
+rectangle return the default empty `Style`; positions outside it return `None`.
+
+The palette is compacted per worksheet. `unique_style_count()` therefore counts
+the styles referenced by that sheet, excluding the synthesized empty style used
+for sparse gaps.
+
+## Inspecting a style
+
+```rust,no_run
+use calamine::{open_workbook, HorizontalAlignment, Xlsx};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut workbook: Xlsx<_> = open_workbook("file.xlsx")?;
+    let styles = workbook.worksheet_style("Sheet1")?;
+
+    for (row, column, style) in styles.cells() {
+        if let Some(font) = style.get_font() {
+            println!("({row}, {column}) font name: {:?}", font.name);
+            println!("font size: {:?}", font.size);
+            println!("bold: {}", font.is_bold());
+            println!("italic: {}", font.is_italic());
+            println!("underlined: {}", font.has_underline());
+            println!("struck through: {}", font.has_strikethrough());
+
+            if let Some(color) = font.color {
+                println!(
+                    "ARGB({}, {}, {}, {})",
+                    color.alpha, color.red, color.green, color.blue
+                );
             }
         }
-        // Similar for right, top, bottom borders
-    }
-}
-```
 
-### Alignment
-```rust
-// Alignment information extracted from Excel files
-if let Some(alignment) = style.get_alignment() {
-    if let Some(horizontal) = alignment.horizontal {
-        println!("Horizontal alignment: {:?}", horizontal);
-    }
-    if let Some(vertical) = alignment.vertical {
-        println!("Vertical alignment: {:?}", vertical);
-    }
-    if alignment.wrap_text.unwrap_or(false) {
-        println!("Text wrapping enabled");
-    }
-}
-```
-
-## Usage Examples
-
-### Reading Styles from Excel Files
-
-```rust
-use calamine::{open_workbook, Reader, Data};
-
-let mut workbook = open_workbook("file.xlsx")?;
-
-if let Ok(range) = workbook.worksheet_range("Sheet1") {
-    for (row, col, cell) in range.cells() {
-        if let Some(cell_data) = cell {
-            if cell_data.has_style() {
-                if let Some(style) = cell_data.get_style() {
-                    println!("Cell ({}, {}) has style:", row, col);
-                    
-                    // Access font properties
-                    if let Some(font) = style.get_font() {
-                        println!("  Font: {}", font.name.as_deref().unwrap_or("Unknown"));
-                        println!("  Size: {}", font.size.unwrap_or(0.0));
-                        println!("  Bold: {}", font.is_bold());
-                        println!("  Italic: {}", font.is_italic());
-                        if let Some(color) = font.color {
-                            let (r, g, b, _) = color.rgba();
-                            println!("  Color: rgb({}, {}, {})", r, g, b);
-                        }
-                    }
-                    
-                    // Access fill properties
-                    if let Some(fill) = style.get_fill() {
-                        if fill.is_visible() {
-                            println!("  Has background fill");
-                            if let Some(color) = fill.get_color() {
-                                let (r, g, b, _) = color.rgba();
-                                println!("  Fill color: rgb({}, {}, {})", r, g, b);
-                            }
-                        }
-                    }
-                    
-                    // Access border properties
-                    if let Some(borders) = style.get_borders() {
-                        if borders.has_visible_borders() {
-                            println!("  Has borders:");
-                            if borders.left.is_visible() {
-                                println!("    Left: {:?}", borders.left.style);
-                            }
-                            if borders.right.is_visible() {
-                                println!("    Right: {:?}", borders.right.style);
-                            }
-                            if borders.top.is_visible() {
-                                println!("    Top: {:?}", borders.top.style);
-                            }
-                            if borders.bottom.is_visible() {
-                                println!("    Bottom: {:?}", borders.bottom.style);
-                            }
-                        }
-                    }
-                    
-                    // Access alignment properties
-                    if let Some(alignment) = style.get_alignment() {
-                        if let Some(horizontal) = alignment.horizontal {
-                            println!("  Horizontal alignment: {:?}", horizontal);
-                        }
-                        if let Some(vertical) = alignment.vertical {
-                            println!("  Vertical alignment: {:?}", vertical);
-                        }
-                        if alignment.wrap_text.unwrap_or(false) {
-                            println!("  Text wrapping: enabled");
-                        }
-                    }
-                }
+        if let Some(fill) = style.get_fill() {
+            if fill.is_visible() {
+                println!("fill pattern: {:?}", fill.pattern);
+                println!("fill color: {:?}", fill.get_color());
             }
         }
-    }
-}
-```
 
-### Checking for Specific Style Properties
-
-```rust
-use calamine::{open_workbook, Reader, FontWeight, HorizontalAlignment};
-
-let mut workbook = open_workbook("file.xlsx")?;
-
-if let Ok(range) = workbook.worksheet_range("Sheet1") {
-    for (row, col, cell) in range.cells() {
-        if let Some(cell_data) = cell {
-            if cell_data.has_style() {
-                if let Some(style) = cell_data.get_style() {
-                    // Check for bold text
-                    if let Some(font) = style.get_font() {
-                        if font.is_bold() {
-                            println!("Cell ({}, {}) has bold text", row, col);
-                        }
-                    }
-                    
-                    // Check for center alignment
-                    if let Some(alignment) = style.get_alignment() {
-                        if alignment.horizontal == Some(HorizontalAlignment::Center) {
-                            println!("Cell ({}, {}) is center-aligned", row, col);
-                        }
-                    }
-                    
-                    // Check for background color
-                    if let Some(fill) = style.get_fill() {
-                        if fill.is_visible() {
-                            println!("Cell ({}, {}) has background color", row, col);
-                        }
-                    }
-                }
+        if let Some(borders) = style.get_borders() {
+            if borders.has_visible_borders() {
+                println!("left border: {:?}", borders.left.style);
+                println!("right border: {:?}", borders.right.style);
+                println!("top border: {:?}", borders.top.style);
+                println!("bottom border: {:?}", borders.bottom.style);
             }
         }
-    }
-}
-```
 
-### Working with CellData
-
-```rust
-use calamine::{CellData, Data};
-
-// When iterating through cells, you get CellData which may contain style information
-fn process_cell(cell_data: &CellData) {
-    // Check if cell has any style information
-    if cell_data.has_style() {
-        println!("Cell value: {:?}", cell_data.get_value());
-        
-        if let Some(style) = cell_data.get_style() {
-            if !style.is_empty() {
-                println!("Cell has formatting");
-                
-                // Process style information as shown in previous examples
-                if let Some(font) = style.get_font() {
-                    if font.is_bold() {
-                        println!("Text is bold");
-                    }
-                }
+        if let Some(alignment) = style.get_alignment() {
+            if alignment.horizontal == HorizontalAlignment::Center {
+                println!("center aligned");
             }
+            if alignment.wrap_text {
+                println!("text wrapping enabled");
+            }
+            println!("vertical alignment: {:?}", alignment.vertical);
+            println!("text rotation: {:?}", alignment.text_rotation);
+        }
+
+        if let Some(number_format) = style.get_number_format() {
+            println!("number format ID: {:?}", number_format.format_id);
+            println!("number format code: {:?}", number_format.format_code);
         }
     }
+
+    Ok(())
 }
 ```
 
-## Supported Formats
+Alignment fields are concrete values, not `Option`s: an omitted OOXML property
+is represented by the enum or boolean default. Font name, size, color, and
+family remain optional because the source record may omit them.
 
-Style extraction is supported for:
-- [x] **XLSX**: Full style support including fonts, fills, borders, and alignment
-- [ ] **XLSB**: Basic style support (format-based)
-- [ ] **XLS**: Basic style support (format-based)
-- [ ] **ODS**: Basic style support (format-based)
+For locale-dependent or unknown built-in number formats, `format_code` is empty
+and `format_id` preserves the workbook's numeric identifier. An empty code must
+not be interpreted as `General`.
 
-## Style Parsing
+## Random access
 
-The style parser extracts information from the Excel styles.xml file, including:
+`StyleRange::get((row, column))` takes coordinates relative to the range start:
 
-### Font Properties
-- Font name
-- Font size  
-- Font weight (bold/normal)
-- Font style (italic/normal)
-- Underline style
-- Strikethrough
-- Font color
-- Font family
+```rust,no_run
+use calamine::{open_workbook, Xlsx};
 
-### Fill Properties
-- Fill pattern (solid, patterns, etc.)
-- Foreground color
-- Background color
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut workbook: Xlsx<_> = open_workbook("file.xlsx")?;
+    let styles = workbook.worksheet_style("Sheet1")?;
 
-### Border Properties
-- Border style (thin, medium, thick, etc.)
-- Border color
-- Border position (left, right, top, bottom, diagonal)
+    if let Some(style) = styles.get((0, 0)) {
+        println!("style at the range's top-left cell: {style:?}");
+    }
 
-### Alignment Properties
-- Horizontal alignment (left, center, right, justify, etc.)
-- Vertical alignment (top, center, bottom, justify, etc.)
-- Text rotation
-- Wrap text
-- Indent level
-- Shrink to fit
+    Ok(())
+}
+```
 
-### Protection Properties
-- Cell locked
-- Cell hidden
+Call `start()` first when translating an absolute worksheet coordinate into a
+relative `get()` coordinate.
 
-## Limitations
+## Related APIs
 
-1. **Theme Colors**: Theme color support is limited and may not fully match Excel's rendering
-2. **Indexed Colors**: Indexed color support is basic
-3. **Complex Patterns**: Some complex fill patterns may not be fully supported
-4. **Conditional Formatting**: Conditional formatting styles are not extracted
+- `worksheet_range()` reads values as `Range<Data>`.
+- `worksheet_style()` reads explicit cell formatting as `StyleRange`.
+- `worksheet_layout()` reads column widths, row heights, defaults, and layout
+  flags as `WorksheetLayout`.
+- `worksheet_cells_reader()` provides XLSX streaming access. Its styled path
+  exposes cell style information; its value-only path deliberately avoids
+  cloning styles.
+- Rich shared and inline strings may be returned as `Data::RichText`. Call
+  `RichText::plain_text()` when formatting runs are not needed.
 
-## Future Enhancements
+## Supported style properties
 
-Planned improvements for style reading include:
-- Full theme color support
-- Conditional formatting style extraction
-- Enhanced pattern support
-- Better color space handling
+The XLSX reader extracts:
 
-## API Reference
+- font name, size, family, weight, style, underline, strikethrough, and color;
+- fill pattern plus foreground and background colors;
+- left, right, top, bottom, and diagonal borders;
+- horizontal and vertical alignment, text rotation, wrapping, indentation, and
+  shrink-to-fit;
+- number format ID and code; and
+- cell protection flags.
 
-### Key Types for Reading Styles
+Theme colors, indexed colors, and OOXML tint values are resolved using the
+workbook's theme and indexed palette when those parts are present.
 
-- `Style`: Complete cell style container (read-only)
-- `Font`: Font properties (read-only)
-- `Fill`: Fill properties (read-only)
-- `Borders`: Border properties (read-only)
-- `Alignment`: Alignment properties (read-only)
-- `Protection`: Protection properties (read-only)
-- `Color`: Color representation (read-only)
-- `CellData`: Cell value with optional style information
+The `Reader` trait also exposes `worksheet_style()` for XLS, XLSB, and ODS so
+generic code can compile across workbook types. Those readers currently return
+an empty `StyleRange` after validating the worksheet name; populated style
+extraction is currently implemented for XLSX.
 
-### Key Methods for Reading Styles
+## Boundaries
 
-- `CellData::get_style()`: Get cell style information
-- `CellData::has_style()`: Check if cell has style information
-- `Style::get_font()`: Get font properties
-- `Style::get_fill()`: Get fill properties
-- `Style::get_borders()`: Get border properties
-- `Style::get_alignment()`: Get alignment properties
-- `Style::is_empty()`: Check if style has any properties
-- `Style::has_visible_properties()`: Check if style has visible properties
-- `Font::is_bold()`: Check if font is bold
-- `Font::is_italic()`: Check if font is italic
-- `Fill::is_visible()`: Check if fill is visible
-- `Borders::has_visible_borders()`: Check if borders are visible
-
-## Migration Guide
-
-The style reading functionality is backward compatible. Existing code will continue to work without changes. To add style reading support:
-
-1. Update your cell iteration to check for styles using `has_style()`
-2. Use `get_style()` to access style information
-3. Access specific style properties through the getter methods
-4. Check for visibility using methods like `is_visible()` and `has_visible_borders()`
-
-## Examples
-
-See the `examples/style.rs` file for a complete working example of style extraction and usage. 
+- Conditional-formatting rules are not evaluated into cell styles.
+- Drawing and chart formatting are outside the worksheet cell-style API.
+- A `StyleRange` covers explicit cell style records, not every default inherited
+  from application rendering behavior.

@@ -980,11 +980,16 @@ impl Style {
 
     /// Check if style has any visible properties
     pub fn has_visible_properties(&self) -> bool {
-        (self
-            .font
-            .as_ref()
-            .is_some_and(|f| f.color.is_some() || f.is_bold() || f.is_italic()))
-            || (self.fill.as_ref().is_some_and(|f| f.is_visible()))
+        (self.font.as_ref().is_some_and(|f| {
+            f.name.is_some()
+                || f.size.is_some()
+                || f.color.is_some()
+                || f.family.is_some()
+                || f.is_bold()
+                || f.is_italic()
+                || f.has_underline()
+                || f.has_strikethrough()
+        })) || (self.fill.as_ref().is_some_and(|f| f.is_visible()))
             || (self
                 .borders
                 .as_ref()
@@ -997,6 +1002,7 @@ impl Style {
                     || a.indent.is_some()
                     || a.shrink_to_fit
             }))
+            || self.number_format.is_some()
     }
 }
 
@@ -1364,6 +1370,26 @@ mod tests {
         assert!(!style.is_empty());
         assert!(style.get_font().is_some());
         assert!(style.get_fill().is_some());
+    }
+
+    #[test]
+    fn test_visible_properties_include_all_rendered_font_and_number_formats() {
+        let font_styles = [
+            Font::new().with_name("Aptos".to_string()),
+            Font::new().with_size(11.0),
+            Font::new().with_family("Swiss".to_string()),
+            Font::new().with_underline(UnderlineStyle::Single),
+            Font::new().with_strikethrough(true),
+        ];
+
+        for font in font_styles {
+            assert!(Style::new().with_font(font).has_visible_properties());
+        }
+        assert!(Style::new()
+            .with_number_format(NumberFormat::new("0.00%".to_string()))
+            .has_visible_properties());
+        assert!(!Style::new().has_visible_properties());
+        assert!(!Style::new().with_font(Font::new()).has_visible_properties());
     }
 
     #[test]

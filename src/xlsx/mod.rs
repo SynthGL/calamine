@@ -2284,13 +2284,14 @@ impl<RS: Read + Seek> Xlsx<RS> {
                 }
                 Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"sheetData" => {
                     // Parse row definitions
+                    let mut next_implicit_row = 0u32;
                     loop {
                         buf.clear();
                         match xml.read_event_into(&mut buf) {
                             Ok(Event::Start(ref row_e))
                                 if row_e.local_name().as_ref() == b"row" =>
                             {
-                                let mut row_num = None;
+                                let mut row_num = next_implicit_row;
                                 let mut height = 0.0;
                                 let mut custom_height = false;
                                 let mut hidden = false;
@@ -2301,11 +2302,13 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                     let attr = attr.map_err(XlsxError::XmlAttr)?;
                                     match attr.key.as_ref() {
                                         b"r" => {
-                                            if let Ok(row_str) = xml.decoder().decode(&attr.value) {
-                                                if let Ok(r) = row_str.parse::<u32>() {
-                                                    row_num = Some(r - 1); // Convert to 0-based
-                                                }
-                                            }
+                                            let row_str = xml.decoder().decode(&attr.value)?;
+                                            let one_based_row = row_str.parse::<u32>()?;
+                                            row_num = one_based_row.checked_sub(1).ok_or(
+                                                XlsxError::Unexpected(
+                                                    "worksheet row index must be one-based",
+                                                ),
+                                            )?;
                                         }
                                         b"ht" => {
                                             if let Ok(height_str) =
@@ -2335,21 +2338,24 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                     }
                                 }
 
+                                if row_num >= MAX_ROWS {
+                                    return Err(XlsxError::RowNumberOverflow);
+                                }
+                                next_implicit_row = row_num.saturating_add(1);
+
                                 // Only add row height if it's custom or has special properties
-                                if let Some(row) = row_num {
-                                    if custom_height
-                                        || hidden
-                                        || thick_top
-                                        || thick_bottom
-                                        || height > 0.0
-                                    {
-                                        let row_height = RowHeight::new(row, height)
-                                            .with_custom_height(custom_height)
-                                            .with_hidden(hidden)
-                                            .with_thick_top(thick_top)
-                                            .with_thick_bottom(thick_bottom);
-                                        layout = layout.add_row_height(row_height);
-                                    }
+                                if custom_height
+                                    || hidden
+                                    || thick_top
+                                    || thick_bottom
+                                    || height > 0.0
+                                {
+                                    let row_height = RowHeight::new(row_num, height)
+                                        .with_custom_height(custom_height)
+                                        .with_hidden(hidden)
+                                        .with_thick_top(thick_top)
+                                        .with_thick_bottom(thick_bottom);
+                                    layout = layout.add_row_height(row_height);
                                 }
 
                                 // Skip to the end of this row element
@@ -2774,41 +2780,48 @@ where
             Ok(Event::Start(e) | Event::Empty(e)) => {
                 match e.local_name().as_ref() {
                     b"b" => {
-                        // Bold - check for val attribute
-                        let mut is_bold = true;
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"val" {
-                                let val = String::from_utf8_lossy(&attr.value);
-                                is_bold = val != "0" && val != "false";
+                        // The element itself is significant even when it
+                        // explicitly disables inherited bold formatting.
+                        let mut bold = true;
+                        for attribute in e.attributes() {
+                            let attribute = attribute?;
+                            if attribute.key.as_ref() == b"val" {
+                                bold = style_parser::parse_ooxml_bool(&attribute.value)?;
+                                break;
                             }
                         }
-                        if is_bold {
-                            font = font.with_weight(FontWeight::Bold);
-                            has_any_props = true;
-                            has_rich_formatting = true;
-                        }
+                        font = font.with_weight(if bold {
+                            FontWeight::Bold
+                        } else {
+                            FontWeight::Normal
+                        });
+                        has_any_props = true;
+                        has_rich_formatting = true;
                     }
                     b"i" => {
-                        // Italic - check for val attribute
-                        let mut is_italic = true;
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"val" {
-                                let val = String::from_utf8_lossy(&attr.value);
-                                is_italic = val != "0" && val != "false";
+                        let mut italic = true;
+                        for attribute in e.attributes() {
+                            let attribute = attribute?;
+                            if attribute.key.as_ref() == b"val" {
+                                italic = style_parser::parse_ooxml_bool(&attribute.value)?;
+                                break;
                             }
                         }
-                        if is_italic {
-                            font = font.with_style(FontStyle::Italic);
-                            has_any_props = true;
-                            has_rich_formatting = true;
-                        }
+                        font = font.with_style(if italic {
+                            FontStyle::Italic
+                        } else {
+                            FontStyle::Normal
+                        });
+                        has_any_props = true;
+                        has_rich_formatting = true;
                     }
                     b"u" => {
                         // Underline
                         let mut underline = UnderlineStyle::Single;
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"val" {
-                                let val = String::from_utf8_lossy(&attr.value);
+                        for attribute in e.attributes() {
+                            let attribute = attribute?;
+                            if attribute.key.as_ref() == b"val" {
+                                let val = String::from_utf8_lossy(&attribute.value);
                                 underline = match val.as_ref() {
                                     "double" => UnderlineStyle::Double,
                                     "singleAccounting" => UnderlineStyle::SingleAccounting,
@@ -2816,28 +2829,25 @@ where
                                     "none" => UnderlineStyle::None,
                                     _ => UnderlineStyle::Single,
                                 };
+                                break;
                             }
                         }
-                        if underline != UnderlineStyle::None {
-                            font = font.with_underline(underline);
-                            has_any_props = true;
-                            has_rich_formatting = true;
-                        }
+                        font = font.with_underline(underline);
+                        has_any_props = true;
+                        has_rich_formatting = true;
                     }
                     b"strike" => {
-                        // Strikethrough
-                        let mut is_strike = true;
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"val" {
-                                let val = String::from_utf8_lossy(&attr.value);
-                                is_strike = val != "0" && val != "false";
+                        let mut strikethrough = true;
+                        for attribute in e.attributes() {
+                            let attribute = attribute?;
+                            if attribute.key.as_ref() == b"val" {
+                                strikethrough = style_parser::parse_ooxml_bool(&attribute.value)?;
+                                break;
                             }
                         }
-                        if is_strike {
-                            font = font.with_strikethrough(true);
-                            has_any_props = true;
-                            has_rich_formatting = true;
-                        }
+                        font = font.with_strikethrough(strikethrough);
+                        has_any_props = true;
+                        has_rich_formatting = true;
                     }
                     b"sz" => {
                         // Font size is run formatting even when no emphasis flag is set
@@ -5001,6 +5011,32 @@ mod tests {
     }
 
     #[test]
+    fn test_worksheet_style_preserves_explicit_cell_xf_zero() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData><row r="1"><c r="A1" s="0"/><c r="B1"/></row></sheetData>
+</worksheet>"#;
+        let style_zero = Style::new().with_font(Font::new().with_name("cell-xf-zero".to_string()));
+        let mut workbook = workbook_with_sheet(sheet_xml, vec![style_zero], Vec::new());
+
+        let styles = workbook.worksheet_style("Sheet1").unwrap();
+
+        assert_eq!(styles.start(), Some((0, 0)));
+        assert_eq!(styles.end(), Some((0, 0)));
+        assert_eq!(styles.unique_style_count(), 1);
+        assert_eq!(
+            styles
+                .get((0, 0))
+                .unwrap()
+                .get_font()
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("cell-xf-zero")
+        );
+    }
+
+    #[test]
     fn test_layout_boolean_lexical_forms_and_malformed_values() {
         let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -5022,6 +5058,29 @@ mod tests {
         let malformed = br#"<worksheet><cols><col min="1" max="1" hidden="sometimes"/></cols><sheetData/></worksheet>"#;
         let mut malformed_workbook = workbook_with_sheet(malformed, Vec::new(), Vec::new());
         assert!(malformed_workbook.worksheet_layout("Sheet1").is_err());
+    }
+
+    #[test]
+    fn test_layout_tracks_implicit_row_indexes() {
+        let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row ht="18" customHeight="1"/>
+    <row/>
+    <row ht="20" customHeight="1"/>
+    <row r="5" ht="22" customHeight="1"/>
+    <row ht="24" customHeight="1"/>
+  </sheetData>
+</worksheet>"#;
+        let mut workbook = workbook_with_sheet(sheet_xml, Vec::new(), Vec::new());
+
+        let layout = workbook.worksheet_layout("Sheet1").unwrap();
+
+        assert_eq!(layout.get_row_height(0).unwrap().height, 18.0);
+        assert!(layout.get_row_height(1).is_none());
+        assert_eq!(layout.get_row_height(2).unwrap().height, 20.0);
+        assert_eq!(layout.get_row_height(4).unwrap().height, 22.0);
+        assert_eq!(layout.get_row_height(5).unwrap().height, 24.0);
     }
 
     #[test]
@@ -5091,7 +5150,7 @@ mod tests {
     #[test]
     fn test_read_shared_strings_with_namespaced_si_name() {
         let shared_strings_data = br#"<?xml version="1.0" encoding="utf-8"?>
-<x:sst count="1187" uniqueCount="1187" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<x:sst count="4" uniqueCount="4" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
     <x:si>
         <x:t>String 1</x:t>
     </x:si>
@@ -5108,9 +5167,20 @@ mod tests {
             <x:t>String 3</x:t>
         </x:r>
     </x:si>
+    <x:si>
+        <x:r>
+            <x:rPr>
+                <x:b val="false"/>
+                <x:i val="0"/>
+                <x:u val="none"/>
+                <x:strike val="false"/>
+            </x:rPr>
+            <x:t>String 4</x:t>
+        </x:r>
+    </x:si>
 </x:sst>"#;
 
-        let mut buf = [0; 1000];
+        let mut buf = [0; 2000];
         let mut zip_writer = ZipWriter::new(std::io::Cursor::new(&mut buf[..]));
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -5140,7 +5210,7 @@ mod tests {
         };
 
         assert!(xlsx.read_shared_strings().is_ok());
-        assert_eq!(3, xlsx.strings.len());
+        assert_eq!(4, xlsx.strings.len());
         assert_eq!(Data::String("String 1".to_string()), xlsx.strings[0]);
         match &xlsx.strings[1] {
             Data::RichText(rich_text) => {
@@ -5150,5 +5220,15 @@ mod tests {
             value => panic!("font-only rich text was collapsed: {value:?}"),
         }
         assert_eq!(Data::String("String 3".to_string()), xlsx.strings[2]);
+        match &xlsx.strings[3] {
+            Data::RichText(rich_text) => {
+                let font = rich_text.runs[0].font.as_ref().unwrap();
+                assert!(!font.is_bold());
+                assert!(!font.is_italic());
+                assert!(!font.has_underline());
+                assert!(!font.has_strikethrough());
+            }
+            value => panic!("explicit run overrides were collapsed: {value:?}"),
+        }
     }
 }

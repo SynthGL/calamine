@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_fill(calamine::Fill::solid(Color::rgb(255, 255, 0)))
         .with_borders(calamine::Borders::new());
 
-    let styled_cell = Cell::with_style((1, 1), Data::Float(3.14), complex_style);
+    let styled_cell = Cell::with_style((1, 1), Data::Float(std::f64::consts::PI), complex_style);
 
     println!("\nCreated cell with complex style:");
     if let Some(style) = styled_cell.get_style() {

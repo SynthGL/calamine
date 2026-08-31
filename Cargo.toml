@@ -16,6 +16,12 @@ exclude = ["tests/**/*"]
 edition = "2021"
 rust-version = "1.83" # For quick-xml + encoding_rs.
 
+[lib]
+# Preserve calamine's public crate path even though the published package has
+# a distinct name. This keeps upstream tests, examples, and downstream source
+# compatible while Cargo can install both packages explicitly.
+name = "calamine"
+
 [dependencies]
 log = "0.4"
 serde = "1.0"

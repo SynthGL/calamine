@@ -33,88 +33,83 @@ fn get_theme_color(theme: u8) -> Color {
     }
 }
 
-/// Get indexed color from Excel's official color index palette
-/// Based on: https://learn.microsoft.com/en-us/office/vba/api/excel.colorindex
-fn get_indexed_color(index: u8) -> Color {
-    match index {
-        // Row 1: Basic colors
-        1 => Color::rgb(0, 0, 0),       // Black
-        2 => Color::rgb(255, 255, 255), // White
-        3 => Color::rgb(255, 0, 0),     // Red
-        4 => Color::rgb(0, 255, 0),     // Green
-        5 => Color::rgb(0, 0, 255),     // Blue
-        6 => Color::rgb(255, 255, 0),   // Yellow
-        7 => Color::rgb(255, 0, 255),   // Magenta
-        8 => Color::rgb(0, 255, 255),   // Cyan
+/// Resolve an OOXML indexed color.
+///
+/// The `indexed` attribute is a zero-based offset into the default
+/// `indexedColors` palette, not VBA's one-based `ColorIndex`.
+pub(super) fn get_indexed_color(index: u8) -> Color {
+    const OOXML_INDEXED_COLORS: [(u8, u8, u8); 64] = [
+        (0x00, 0x00, 0x00),
+        (0xFF, 0xFF, 0xFF),
+        (0xFF, 0x00, 0x00),
+        (0x00, 0xFF, 0x00),
+        (0x00, 0x00, 0xFF),
+        (0xFF, 0xFF, 0x00),
+        (0xFF, 0x00, 0xFF),
+        (0x00, 0xFF, 0xFF),
+        (0x00, 0x00, 0x00),
+        (0xFF, 0xFF, 0xFF),
+        (0xFF, 0x00, 0x00),
+        (0x00, 0xFF, 0x00),
+        (0x00, 0x00, 0xFF),
+        (0xFF, 0xFF, 0x00),
+        (0xFF, 0x00, 0xFF),
+        (0x00, 0xFF, 0xFF),
+        (0x80, 0x00, 0x00),
+        (0x00, 0x80, 0x00),
+        (0x00, 0x00, 0x80),
+        (0x80, 0x80, 0x00),
+        (0x80, 0x00, 0x80),
+        (0x00, 0x80, 0x80),
+        (0xC0, 0xC0, 0xC0),
+        (0x80, 0x80, 0x80),
+        (0x99, 0x99, 0xFF),
+        (0x99, 0x33, 0x66),
+        (0xFF, 0xFF, 0xCC),
+        (0xCC, 0xFF, 0xFF),
+        (0x66, 0x00, 0x66),
+        (0xFF, 0x80, 0x80),
+        (0x00, 0x66, 0xCC),
+        (0xCC, 0xCC, 0xFF),
+        (0x00, 0x00, 0x80),
+        (0xFF, 0x00, 0xFF),
+        (0xFF, 0xFF, 0x00),
+        (0x00, 0xFF, 0xFF),
+        (0x80, 0x00, 0x80),
+        (0x80, 0x00, 0x00),
+        (0x00, 0x80, 0x80),
+        (0x00, 0x00, 0xFF),
+        (0x00, 0xCC, 0xFF),
+        (0xCC, 0xFF, 0xFF),
+        (0xCC, 0xFF, 0xCC),
+        (0xFF, 0xFF, 0x99),
+        (0x99, 0xCC, 0xFF),
+        (0xFF, 0x99, 0xCC),
+        (0xCC, 0x99, 0xFF),
+        (0xFF, 0xCC, 0x99),
+        (0x33, 0x66, 0xFF),
+        (0x33, 0xCC, 0xCC),
+        (0x99, 0xCC, 0x00),
+        (0xFF, 0xCC, 0x00),
+        (0xFF, 0x99, 0x00),
+        (0xFF, 0x66, 0x00),
+        (0x66, 0x66, 0x99),
+        (0x96, 0x96, 0x96),
+        (0x00, 0x33, 0x66),
+        (0x33, 0x99, 0x66),
+        (0x00, 0x33, 0x00),
+        (0x33, 0x33, 0x00),
+        (0x99, 0x33, 0x00),
+        (0x99, 0x33, 0x66),
+        (0x33, 0x33, 0x99),
+        (0x33, 0x33, 0x33),
+    ];
 
-        // Row 2: Dark variants
-        9 => Color::rgb(128, 0, 0),      // Dark Red
-        10 => Color::rgb(0, 128, 0),     // Dark Green
-        11 => Color::rgb(0, 0, 128),     // Dark Blue
-        12 => Color::rgb(128, 128, 0),   // Dark Yellow
-        13 => Color::rgb(128, 0, 128),   // Dark Magenta
-        14 => Color::rgb(0, 128, 128),   // Dark Cyan
-        15 => Color::rgb(192, 192, 192), // Light Gray
-        16 => Color::rgb(128, 128, 128), // Gray
-
-        // Row 3: Light blue variants
-        17 => Color::rgb(153, 153, 255), // Light Blue
-        18 => Color::rgb(153, 51, 102),  // Dark Pink
-        19 => Color::rgb(255, 255, 204), // Light Yellow
-        20 => Color::rgb(204, 255, 255), // Light Cyan
-        21 => Color::rgb(102, 0, 102),   // Dark Purple
-        22 => Color::rgb(255, 128, 128), // Light Red
-        23 => Color::rgb(0, 102, 204),   // Medium Blue
-        24 => Color::rgb(204, 204, 255), // Light Purple
-
-        // Row 4: More variants
-        25 => Color::rgb(0, 0, 128),   // Navy
-        26 => Color::rgb(255, 0, 255), // Fuchsia
-        27 => Color::rgb(255, 255, 0), // Yellow
-        28 => Color::rgb(0, 255, 255), // Aqua
-        29 => Color::rgb(128, 0, 128), // Purple
-        30 => Color::rgb(128, 0, 0),   // Maroon
-        31 => Color::rgb(0, 128, 128), // Teal
-        32 => Color::rgb(0, 0, 255),   // Blue
-
-        // Row 5: Sky blue variants
-        33 => Color::rgb(0, 204, 255),   // Sky Blue
-        34 => Color::rgb(204, 255, 255), // Light Turquoise
-        35 => Color::rgb(204, 255, 204), // Light Green
-        36 => Color::rgb(255, 255, 153), // Light Yellow
-        37 => Color::rgb(153, 204, 255), // Pale Blue
-        38 => Color::rgb(255, 153, 204), // Pink
-        39 => Color::rgb(204, 153, 255), // Lavender
-        40 => Color::rgb(255, 204, 153), // Tan
-
-        // Row 6: Bright variants
-        41 => Color::rgb(51, 102, 255),  // Bright Blue
-        42 => Color::rgb(51, 204, 204),  // Aqua
-        43 => Color::rgb(153, 204, 0),   // Lime
-        44 => Color::rgb(255, 204, 0),   // Gold
-        45 => Color::rgb(255, 153, 0),   // Orange
-        46 => Color::rgb(255, 102, 0),   // Orange Red
-        47 => Color::rgb(102, 102, 153), // Blue Gray
-        48 => Color::rgb(150, 150, 150), // Gray 40%
-
-        // Row 7: Dark variants
-        49 => Color::rgb(0, 51, 102),   // Dark Teal
-        50 => Color::rgb(51, 153, 102), // Sea Green
-        51 => Color::rgb(0, 51, 0),     // Dark Green
-        52 => Color::rgb(51, 51, 0),    // Olive
-        53 => Color::rgb(153, 51, 0),   // Brown
-        54 => Color::rgb(153, 51, 102), // Plum
-        55 => Color::rgb(51, 51, 153),  // Indigo
-        56 => Color::rgb(51, 51, 51),   // Gray 80%
-
-        // Special auto/system colors
-        0 => Color::rgb(0, 0, 0),        // Auto (Black)
-        64 => Color::rgb(192, 192, 192), // System window background
-        65 => Color::rgb(0, 0, 0),       // System auto color
-
-        // Default fallback
-        _ => Color::rgb(0, 0, 0), // Black for unknown indices
-    }
+    let (red, green, blue) = OOXML_INDEXED_COLORS
+        .get(usize::from(index))
+        .copied()
+        .unwrap_or((0, 0, 0));
+    Color::rgb(red, green, blue)
 }
 
 /// Parse color from XML attributes
@@ -465,107 +460,124 @@ pub fn parse_fill<RS: BufRead>(
     Ok(fill)
 }
 
+fn parse_ooxml_bool(value: &[u8]) -> Result<bool, XlsxError> {
+    match value {
+        b"1" | b"true" => Ok(true),
+        b"0" | b"false" => Ok(false),
+        _ => Err(XlsxError::Unexpected("invalid OOXML boolean")),
+    }
+}
+
+fn border_from_element(element: &BytesStart<'_>) -> Result<Border, XlsxError> {
+    let attributes = element.attributes().collect::<Result<Vec<_>, _>>()?;
+    let mut style = BorderStyle::None;
+    for attribute in &attributes {
+        if attribute.key.as_ref() == b"style" {
+            style = parse_border_style(&String::from_utf8_lossy(&attribute.value));
+        }
+    }
+
+    Ok(match parse_color(&attributes)? {
+        Some(color) => Border::with_color(style, color),
+        None => Border::new(style),
+    })
+}
+
+fn apply_border(
+    borders: &mut Borders,
+    side: &[u8],
+    border: Border,
+    diagonal_down: bool,
+    diagonal_up: bool,
+) {
+    match side {
+        b"left" => borders.left = border,
+        b"right" => borders.right = border,
+        b"top" => borders.top = border,
+        b"bottom" => borders.bottom = border,
+        b"diagonal" => {
+            if diagonal_down {
+                borders.diagonal_down = border.clone();
+            }
+            if diagonal_up {
+                borders.diagonal_up = border;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_border_side(name: &[u8]) -> bool {
+    matches!(name, b"left" | b"right" | b"top" | b"bottom" | b"diagonal")
+}
+
 /// Parse border element
 pub fn parse_border<RS: BufRead>(
     xml: &mut Reader<RS>,
-    _start_elem: &BytesStart,
+    start_elem: &BytesStart<'_>,
 ) -> Result<Borders, XlsxError> {
     let mut borders = Borders::new();
+    let mut diagonal_down = false;
+    let mut diagonal_up = false;
 
-    // Border elements can have attributes like diagonalUp, diagonalDown, etc.
-    // TODO(ddimaria): Add specific border attribute parsing here if needed
-
-    // Parse attributes from the opening border element
-    // for attr in start_elem.attributes() {
-    //     let attr = attr?;
-    //     match attr.key.as_ref() {
-    //         _ => {}
-    //     }
-    // }
+    // OOXML stores diagonal direction on the parent <border>, not on the
+    // <diagonal> child that carries the line style and color.
+    for attribute in start_elem.attributes() {
+        let attribute = attribute?;
+        match attribute.key.as_ref() {
+            b"diagonalDown" => diagonal_down = parse_ooxml_bool(&attribute.value)?,
+            b"diagonalUp" => diagonal_up = parse_ooxml_bool(&attribute.value)?,
+            _ => {}
+        }
+    }
 
     let mut buf = Vec::new();
-
     loop {
         buf.clear();
         match xml.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => {
-                match e.local_name().as_ref() {
-                    b"left" | b"right" | b"top" | b"bottom" | b"diagonal" => {
-                        let mut style = BorderStyle::None;
-                        let mut color = None;
+            Ok(Event::Start(ref element)) if is_border_side(element.local_name().as_ref()) => {
+                let side = element.local_name().as_ref().to_vec();
+                let closing = element.name();
+                let mut border = border_from_element(element)?;
+                let mut inner_buf = Vec::new();
 
-                        // Parse attributes for style
-                        for attr in e.attributes() {
-                            let attr = attr?;
-                            if attr.key.as_ref() == b"style" {
-                                let style_str = String::from_utf8_lossy(&attr.value);
-                                style = parse_border_style(&style_str);
-                            }
+                loop {
+                    inner_buf.clear();
+                    match xml.read_event_into(&mut inner_buf) {
+                        Ok(Event::Start(ref inner)) if inner.local_name().as_ref() == b"color" => {
+                            let attributes = inner.attributes().collect::<Result<Vec<_>, _>>()?;
+                            border.color = parse_color(&attributes)?;
+                            xml.read_to_end_into(inner.name(), &mut Vec::new())?;
                         }
-
-                        // Check for color attributes directly on the border element (fallback)
-                        if let Some(border_color) =
-                            parse_color(&e.attributes().collect::<Result<Vec<_>, _>>()?)?
-                        {
-                            color = Some(border_color);
+                        Ok(Event::Empty(ref inner)) if inner.local_name().as_ref() == b"color" => {
+                            let attributes = inner.attributes().collect::<Result<Vec<_>, _>>()?;
+                            border.color = parse_color(&attributes)?;
                         }
-
-                        // Parse nested elements (primarily for color)
-                        let mut inner_buf = Vec::new();
-                        loop {
-                            inner_buf.clear();
-                            match xml.read_event_into(&mut inner_buf) {
-                                Ok(Event::Start(ref inner_e)) => {
-                                    if inner_e.local_name().as_ref() == b"color" {
-                                        if let Some(border_color) = parse_color(
-                                            &inner_e.attributes().collect::<Result<Vec<_>, _>>()?,
-                                        )? {
-                                            color = Some(border_color);
-                                        }
-                                    }
-                                }
-                                Ok(Event::End(ref inner_e))
-                                    if inner_e.local_name().as_ref() == e.local_name().as_ref() =>
-                                {
-                                    break
-                                }
-                                Ok(Event::Eof) => return Err(XlsxError::XmlEof("border side")),
-                                Err(e) => return Err(XlsxError::Xml(e)),
-                                _ => {}
-                            }
+                        Ok(Event::Start(ref inner)) => {
+                            xml.read_to_end_into(inner.name(), &mut Vec::new())?;
                         }
-
-                        let border = if let Some(c) = color {
-                            Border::with_color(style, c)
-                        } else {
-                            Border::new(style)
-                        };
-
-                        match e.local_name().as_ref() {
-                            b"left" => borders.left = border,
-                            b"right" => borders.right = border,
-                            b"top" => borders.top = border,
-                            b"bottom" => borders.bottom = border,
-                            b"diagonal" => {
-                                // Check if it's diagonal down or up
-                                for attr in e.attributes() {
-                                    let attr = attr?;
-                                    if attr.key.as_ref() == b"diagonalDown" {
-                                        borders.diagonal_down = border.clone();
-                                    } else if attr.key.as_ref() == b"diagonalUp" {
-                                        borders.diagonal_up = border.clone();
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
+                        Ok(Event::End(ref inner)) if inner.name() == closing => break,
+                        Ok(Event::Eof) => return Err(XlsxError::XmlEof("border side")),
+                        Err(error) => return Err(XlsxError::Xml(error)),
+                        _ => {}
                     }
-                    _ => {}
                 }
+
+                apply_border(&mut borders, &side, border, diagonal_down, diagonal_up);
             }
-            Ok(Event::End(ref e)) if e.local_name().as_ref() == b"border" => break,
+            Ok(Event::Empty(ref element)) if is_border_side(element.local_name().as_ref()) => {
+                let border = border_from_element(element)?;
+                apply_border(
+                    &mut borders,
+                    element.local_name().as_ref(),
+                    border,
+                    diagonal_down,
+                    diagonal_up,
+                );
+            }
+            Ok(Event::End(ref element)) if element.local_name().as_ref() == b"border" => break,
             Ok(Event::Eof) => return Err(XlsxError::XmlEof("border")),
-            Err(e) => return Err(XlsxError::Xml(e)),
+            Err(error) => return Err(XlsxError::Xml(error)),
             _ => {}
         }
     }
@@ -676,5 +688,61 @@ fn read_string<RS: BufRead>(
         Ok(None)
     } else {
         Ok(Some(content))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn parse_border_xml(source: &[u8]) -> Result<Borders, XlsxError> {
+        let mut xml = Reader::from_reader(Cursor::new(source));
+        let mut buf = Vec::new();
+        let start = match xml.read_event_into(&mut buf).unwrap() {
+            Event::Start(element) => element.into_owned(),
+            event => panic!("expected border start, got {event:?}"),
+        };
+        parse_border(&mut xml, &start)
+    }
+
+    #[test]
+    fn indexed_colors_use_zero_based_ooxml_offsets() {
+        assert_eq!(get_indexed_color(0), Color::rgb(0, 0, 0));
+        assert_eq!(get_indexed_color(1), Color::rgb(255, 255, 255));
+        assert_eq!(get_indexed_color(2), Color::rgb(255, 0, 0));
+        assert_eq!(get_indexed_color(7), Color::rgb(0, 255, 255));
+        assert_eq!(get_indexed_color(63), Color::rgb(51, 51, 51));
+    }
+
+    #[test]
+    fn diagonal_direction_comes_from_parent_border_attributes() {
+        let borders = parse_border_xml(
+            br#"<border diagonalUp="1" diagonalDown="true"><diagonal style="thin"><color indexed="2"/></diagonal></border>"#,
+        )
+        .unwrap();
+
+        assert_eq!(borders.diagonal_up.style, BorderStyle::Thin);
+        assert_eq!(borders.diagonal_down.style, BorderStyle::Thin);
+        assert_eq!(borders.diagonal_up.color, Some(Color::rgb(255, 0, 0)));
+        assert_eq!(borders.diagonal_down.color, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn self_closing_diagonal_side_retains_parent_direction() {
+        let borders =
+            parse_border_xml(br#"<border diagonalUp="1"><diagonal style="thin"/></border>"#)
+                .unwrap();
+
+        assert_eq!(borders.diagonal_up.style, BorderStyle::Thin);
+        assert_eq!(borders.diagonal_down.style, BorderStyle::None);
+    }
+
+    #[test]
+    fn malformed_diagonal_direction_is_rejected() {
+        assert!(parse_border_xml(
+            br#"<border diagonalUp="sometimes"><diagonal style="thin"/></border>"#,
+        )
+        .is_err());
     }
 }

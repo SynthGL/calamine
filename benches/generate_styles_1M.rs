@@ -73,9 +73,6 @@ fn main() -> Result<(), XlsxError> {
     let blue_font = Format::new().set_font_color(Color::Blue);
     let green_font = Format::new().set_font_color(Color::Green);
     let purple_font = Format::new().set_font_color(Color::Purple);
-    let fill_cyan = Format::new().set_background_color(Color::Cyan);
-    let fill_magenta = Format::new().set_background_color(Color::Magenta);
-    let fill_orange = Format::new().set_background_color(Color::Orange);
 
     // The pattern of styles to repeat (20 columns x 50 rows = 1000 cells per block)
     // 1000 repetitions = 1M cells, ~3.2MB file

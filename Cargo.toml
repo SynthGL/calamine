@@ -14,7 +14,7 @@ keywords = ["excel", "xlsx", "styles", "calamine", "formatting"]
 categories = ["encoding", "parsing", "text-processing"]
 exclude = ["tests/**/*"]
 edition = "2021"
-rust-version = "1.86" # Required by quick-xml 0.42.
+rust-version = "1.88" # Required by zip 8.6.
 autobenches = false
 
 [lib]
@@ -29,7 +29,7 @@ atoi_simd = "0.17"
 byteorder = "1.5"
 encoding_rs = "0.8"
 fast-float2 = "0.2"
-zip = { version = "7.0", default-features = false, features = ["deflate"] }
+zip = { version = "~8.6", default-features = false, features = ["deflate"] }
 quick-xml = { version = "0.42", features = ["encoding"] }
 
 # Optional dependencies.

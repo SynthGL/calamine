@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Upgrade `quick-xml` to `^0.42` while retaining `zip ^7.0` and the existing
-  `Style` and `StyleRange` APIs. The minimum supported Rust version is now 1.86.
+- Upgrade `quick-xml` to `^0.42` and `zip` to `~8.6` while retaining the existing
+  `Style` and `StyleRange` APIs and the `calamine_styles` library name. The minimum
+  supported Rust version is now 1.88, as required by `zip 8.6`.
 - Expose the library as `calamine_styles`, matching the published
   `calamine-styles` package. Update examples, tests, and documentation to use
   that crate name directly.

@@ -898,7 +898,7 @@ impl ExcelDateTime {
     /// An example of converting an Excel date/time to standard components.
     ///
     /// ```
-    /// use calamine::{ExcelDateTime, ExcelDateTimeType};
+    /// use calamine_styles::{ExcelDateTime, ExcelDateTimeType};
     ///
     /// // Create an Excel datetime from the serial value 45943.541 which is
     /// // equivalent to the date "2025/10/13 12:59:02.400".

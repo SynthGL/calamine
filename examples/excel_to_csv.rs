@@ -2,7 +2,7 @@
 //
 // Copyright 2016-2025, Johann Tuffe.
 
-//! An example for using the `calamine` crate to convert an Excel file to CSV.
+//! An example for using the `calamine_styles` crate to convert an Excel file to CSV.
 //!
 //! Converts XLSX, XLSM, XLSB, and XLS files. The filename and sheet name must
 //! be specified as command line arguments. The output CSV will be written to a
@@ -13,7 +13,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
-use calamine::{open_workbook_auto, Data, Range, Reader};
+use calamine_styles::{open_workbook_auto, Data, Range, Reader};
 
 // usage: cargo run --example excel_to_csv file.xls[xmb] sheet_name
 //

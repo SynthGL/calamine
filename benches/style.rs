@@ -33,7 +33,7 @@
 //!
 //! This opens Firefox Profiler with an interactive flamegraph showing where time is spent.
 
-use calamine::{open_workbook, Reader, Xlsx};
+use calamine_styles::{open_workbook, Reader, Xlsx};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
 use std::fs::File;
 use std::hint::black_box;

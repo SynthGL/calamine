@@ -106,7 +106,7 @@ impl RangeDeserializerBuilder<'static, &'static str> {
     /// # Example
     ///
     /// ```
-    /// # use calamine::{Data, Error, open_workbook, Xlsx, Reader, RangeDeserializerBuilder};
+    /// # use calamine_styles::{Data, Error, open_workbook, Xlsx, Reader, RangeDeserializerBuilder};
     /// fn main() -> Result<(), Error> {
     ///     let path = format!("{}/tests/temperature.xlsx", env!("CARGO_MANIFEST_DIR"));
     ///     let mut workbook: Xlsx<_> = open_workbook(path)?;
@@ -149,7 +149,7 @@ impl<'h, H: AsRef<str> + Clone + 'h> RangeDeserializerBuilder<'h, H> {
     /// # Example
     ///
     /// ```
-    /// # use calamine::{open_workbook, Error, Xlsx, Reader, RangeDeserializerBuilder};
+    /// # use calamine_styles::{open_workbook, Error, Xlsx, Reader, RangeDeserializerBuilder};
     /// fn main() -> Result<(), Error> {
     ///     let path = format!("{}/tests/temperature.xlsx", env!("CARGO_MANIFEST_DIR"));
     ///     let mut workbook: Xlsx<_> = open_workbook(path)?;
@@ -178,7 +178,7 @@ impl<'h, H: AsRef<str> + Clone + 'h> RangeDeserializerBuilder<'h, H> {
     /// # Example
     ///
     /// ```
-    /// # use calamine::{open_workbook, Error, Xlsx, Reader, RangeDeserializerBuilder};
+    /// # use calamine_styles::{open_workbook, Error, Xlsx, Reader, RangeDeserializerBuilder};
     /// fn main() -> Result<(), Error> {
     ///     let path = format!("{}/tests/temperature.xlsx", env!("CARGO_MANIFEST_DIR"));
     ///     let mut workbook: Xlsx<_> = open_workbook(path)?;
@@ -215,7 +215,7 @@ impl<'h> RangeDeserializerBuilder<'h, &str> {
     /// # Example
     ///
     /// ```
-    /// # use calamine::{open_workbook, Error, RangeDeserializerBuilder, Reader, Xlsx};
+    /// # use calamine_styles::{open_workbook, Error, RangeDeserializerBuilder, Reader, Xlsx};
     /// # use serde_derive::Deserialize;
     /// #[derive(Deserialize)]
     /// struct Record {
@@ -294,7 +294,7 @@ impl<'h> RangeDeserializerBuilder<'h, &str> {
 /// # Example
 ///
 /// ```
-/// # use calamine::{open_workbook, Error, Xlsx, Reader, RangeDeserializerBuilder};
+/// # use calamine_styles::{open_workbook, Error, Xlsx, Reader, RangeDeserializerBuilder};
 /// fn main() -> Result<(), Error> {
 ///     let path = format!("{}/tests/temperature.xlsx", env!("CARGO_MANIFEST_DIR"));
 ///     let mut workbook: Xlsx<_> = open_workbook(path)?;

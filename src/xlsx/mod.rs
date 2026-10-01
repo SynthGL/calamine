@@ -19,7 +19,6 @@ use quick_xml::events::attributes::{AttrError, Attribute, Attributes};
 use quick_xml::events::BytesStart;
 use quick_xml::events::Event;
 use quick_xml::name::QName;
-use quick_xml::Decoder;
 use quick_xml::Reader as XmlReader;
 use zip::read::{ZipArchive, ZipFile};
 use zip::result::ZipError;
@@ -38,7 +37,7 @@ use crate::{
 };
 pub use cells_reader::XlsxCellReader;
 
-pub(crate) type XlReader<'a, RS> = XmlReader<BufReader<ZipFile<'a, RS>>>;
+pub(crate) type XlReader<'a, RS> = crate::utils::XmlReader<BufReader<ZipFile<'a, RS>>>;
 
 /// Maximum number of rows allowed in an XLSX file.
 pub const MAX_ROWS: u32 = 1_048_576;
@@ -246,51 +245,35 @@ fn parse_xf_record<R: std::io::BufRead>(
     for attribute in start.attributes() {
         let attribute = attribute?;
         match attribute.key.as_ref() {
-            b"xfId" => {
-                base_style_id = xml
-                    .decoder()
-                    .decode(&attribute.value)?
-                    .parse::<usize>()
-                    .ok();
+            "xfId" => {
+                base_style_id = attribute.value.parse::<usize>().ok();
             }
-            b"fontId" => {
-                font_id = xml
-                    .decoder()
-                    .decode(&attribute.value)?
-                    .parse::<usize>()
-                    .ok();
+            "fontId" => {
+                font_id = attribute.value.parse::<usize>().ok();
             }
-            b"fillId" => {
-                fill_id = xml
-                    .decoder()
-                    .decode(&attribute.value)?
-                    .parse::<usize>()
-                    .ok();
+            "fillId" => {
+                fill_id = attribute.value.parse::<usize>().ok();
             }
-            b"borderId" => {
-                border_id = xml
-                    .decoder()
-                    .decode(&attribute.value)?
-                    .parse::<usize>()
-                    .ok();
+            "borderId" => {
+                border_id = attribute.value.parse::<usize>().ok();
             }
-            b"numFmtId" => num_fmt_id_bytes = Some(attribute.value.to_vec()),
-            b"applyFont" => {
+            "numFmtId" => num_fmt_id_bytes = Some(attribute.value.as_bytes().to_vec()),
+            "applyFont" => {
                 apply_font = style_parser::parse_ooxml_bool(&attribute.value)?;
             }
-            b"applyFill" => {
+            "applyFill" => {
                 apply_fill = style_parser::parse_ooxml_bool(&attribute.value)?;
             }
-            b"applyBorder" => {
+            "applyBorder" => {
                 apply_border = style_parser::parse_ooxml_bool(&attribute.value)?;
             }
-            b"applyNumberFormat" => {
+            "applyNumberFormat" => {
                 apply_number_format = style_parser::parse_ooxml_bool(&attribute.value)?;
             }
-            b"applyAlignment" => {
+            "applyAlignment" => {
                 apply_alignment = style_parser::parse_ooxml_bool(&attribute.value)?;
             }
-            b"applyProtection" => {
+            "applyProtection" => {
                 apply_protection = style_parser::parse_ooxml_bool(&attribute.value)?;
             }
             _ => {}
@@ -324,7 +307,7 @@ fn parse_xf_record<R: std::io::BufRead>(
 
     if apply_number_format {
         if let Some(id_bytes) = num_fmt_id_bytes.as_ref() {
-            if let Ok(num_fmt_id) = xml.decoder().decode(id_bytes)?.parse::<u32>() {
+            if let Ok(num_fmt_id) = atoi_simd::parse::<u32>(id_bytes) {
                 let format_code = match number_formats.get(id_bytes) {
                     Some(raw) => raw.clone(),
                     None => builtin_number_format_code(num_fmt_id)
@@ -347,13 +330,13 @@ fn parse_xf_record<R: std::io::BufRead>(
         nested_buf.clear();
         match xml.read_event_into(&mut nested_buf) {
             Ok(Event::Start(ref nested)) => match nested.local_name().as_ref() {
-                b"alignment" => {
+                "alignment" => {
                     let alignment = style_parser::parse_alignment(xml, nested)?;
                     if apply_alignment {
                         style = style.with_alignment(alignment);
                     }
                 }
-                b"protection" => {
+                "protection" => {
                     let protection = style_parser::parse_protection(xml, nested)?;
                     if apply_protection {
                         style = style.with_protection(protection);
@@ -364,13 +347,13 @@ fn parse_xf_record<R: std::io::BufRead>(
                 }
             },
             Ok(Event::Empty(ref nested)) => match nested.local_name().as_ref() {
-                b"alignment" => {
+                "alignment" => {
                     let alignment = style_parser::parse_alignment(xml, nested)?;
                     if apply_alignment {
                         style = style.with_alignment(alignment);
                     }
                 }
-                b"protection" => {
+                "protection" => {
                     let protection = style_parser::parse_protection(xml, nested)?;
                     if apply_protection {
                         style = style.with_protection(protection);
@@ -378,7 +361,7 @@ fn parse_xf_record<R: std::io::BufRead>(
                 }
                 _ => {}
             },
-            Ok(Event::End(ref end)) if end.local_name().as_ref() == b"xf" => break,
+            Ok(Event::End(ref end)) if end.local_name().as_ref() == "xf" => break,
             Ok(Event::Eof) => return Err(XlsxError::XmlEof("xf")),
             Err(error) => return Err(XlsxError::Xml(error)),
             _ => {}
@@ -651,15 +634,15 @@ impl<RS: Read + Seek> Xlsx<RS> {
             match xml.read_event_into(&mut buf) {
                 Ok(Event::Start(ref element)) => {
                     let name = element.local_name();
-                    if name.as_ref() == b"clrScheme" {
+                    if name.as_ref() == "clrScheme" {
                         in_color_scheme = true;
                     } else if in_color_scheme {
-                        if let Some(slot) = theme_slot(name.as_ref()) {
+                        if let Some(slot) = theme_slot(name.as_ref().as_bytes()) {
                             active_slot = Some(slot);
                         } else if let Some(slot) = active_slot {
                             let target_attribute = match name.as_ref() {
-                                b"srgbClr" => Some(b"val".as_slice()),
-                                b"sysClr" => Some(b"lastClr".as_slice()),
+                                "srgbClr" => Some("val"),
+                                "sysClr" => Some("lastClr"),
                                 _ => None,
                             };
                             if let Some(target_attribute) = target_attribute {
@@ -667,7 +650,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                     let attribute = attribute?;
                                     if attribute.key.as_ref() == target_attribute {
                                         self.theme_colors[slot] =
-                                            parse_theme_rgb(attribute.value.as_ref())?;
+                                            parse_theme_rgb(attribute.value.as_bytes())?;
                                         break;
                                     }
                                 }
@@ -675,11 +658,11 @@ impl<RS: Read + Seek> Xlsx<RS> {
                         }
                     }
                 }
-                Ok(Event::End(ref element)) if element.local_name().as_ref() == b"clrScheme" => {
+                Ok(Event::End(ref element)) if element.local_name().as_ref() == "clrScheme" => {
                     break;
                 }
                 Ok(Event::End(ref element))
-                    if theme_slot(element.local_name().as_ref()).is_some() =>
+                    if theme_slot(element.local_name().as_ref().as_bytes()).is_some() =>
                 {
                     active_slot = None;
                 }
@@ -704,12 +687,12 @@ impl<RS: Read + Seek> Xlsx<RS> {
             buf.clear();
             match xml.read_event_into(&mut buf) {
                 Ok(Event::Start(ref element))
-                    if element.local_name().as_ref() == b"indexedColors" =>
+                    if element.local_name().as_ref() == "indexedColors" =>
                 {
                     in_indexed_colors = true;
                 }
                 Ok(Event::Start(ref element))
-                    if in_indexed_colors && element.local_name().as_ref() == b"rgbColor" =>
+                    if in_indexed_colors && element.local_name().as_ref() == "rgbColor" =>
                 {
                     if index < self.indexed_colors.len() {
                         let attributes = element.attributes().collect::<Result<Vec<_>, _>>()?;
@@ -727,7 +710,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                     index = index.saturating_add(1);
                 }
                 Ok(Event::End(ref element))
-                    if element.local_name().as_ref() == b"indexedColors" =>
+                    if element.local_name().as_ref() == "indexedColors" =>
                 {
                     break;
                 }
@@ -748,7 +731,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
         loop {
             buf.clear();
             match xml.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) if e.local_name().as_ref() == b"si" => {
+                Ok(Event::Start(e)) if e.local_name().as_ref() == "si" => {
                     if let Some(data) = read_rich_string(
                         &mut xml,
                         e.name(),
@@ -758,7 +741,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                         self.strings.push(data);
                     }
                 }
-                Ok(Event::End(e)) if e.local_name().as_ref() == b"sst" => break,
+                Ok(Event::End(e)) if e.local_name().as_ref() == "sst" => break,
                 Ok(Event::Eof) => return Err(XlsxError::XmlEof("sst")),
                 Err(e) => return Err(XlsxError::Xml(e)),
                 _ => (),
@@ -785,11 +768,11 @@ impl<RS: Read + Seek> Xlsx<RS> {
         loop {
             buf.clear();
             match xml.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) if e.local_name().as_ref() == b"numFmts" => loop {
+                Ok(Event::Start(e)) if e.local_name().as_ref() == "numFmts" => loop {
                     inner_buf.clear();
                     match xml.read_event_into(&mut inner_buf) {
                         Ok(Event::Start(e) | Event::Empty(e))
-                            if e.local_name().as_ref() == b"numFmt" =>
+                            if e.local_name().as_ref() == "numFmt" =>
                         {
                             let mut id = Vec::new();
                             let mut format = None;
@@ -797,16 +780,15 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                 let a = a?;
                                 match a {
                                     Attribute {
-                                        key: QName(b"numFmtId"),
+                                        key: QName("numFmtId"),
                                         value: v,
-                                    } => id.extend_from_slice(&v),
+                                    } => id.extend_from_slice(v.as_bytes()),
                                     Attribute {
-                                        key: QName(b"formatCode"),
+                                        key: QName("formatCode"),
                                         ..
                                     } => {
-                                        let raw = a
-                                            .decode_and_unescape_value(xml.decoder())?
-                                            .into_owned();
+                                        let raw = quick_xml::escape::unescape(&a.value)
+                                            .map_err(quick_xml::Error::from)?.into_owned();
                                         format = Some(raw);
                                     }
                                     _ => (),
@@ -816,16 +798,16 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                 number_formats.insert(id, format);
                             }
                         }
-                        Ok(Event::End(e)) if e.local_name().as_ref() == b"numFmts" => break,
+                        Ok(Event::End(e)) if e.local_name().as_ref() == "numFmts" => break,
                         Ok(Event::Eof) => return Err(XlsxError::XmlEof("numFmts")),
                         Err(e) => return Err(XlsxError::Xml(e)),
                         _ => (),
                     }
                 },
-                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"fonts" => loop {
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == "fonts" => loop {
                     inner_buf.clear();
                     match xml.read_event_into(&mut inner_buf) {
-                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"font" => {
+                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == "font" => {
                             let font = style_parser::parse_font(
                                 &mut xml,
                                 e,
@@ -834,16 +816,16 @@ impl<RS: Read + Seek> Xlsx<RS> {
                             )?;
                             fonts.push(font);
                         }
-                        Ok(Event::End(ref e)) if e.local_name().as_ref() == b"fonts" => break,
+                        Ok(Event::End(ref e)) if e.local_name().as_ref() == "fonts" => break,
                         Ok(Event::Eof) => return Err(XlsxError::XmlEof("fonts")),
                         Err(e) => return Err(XlsxError::Xml(e)),
                         _ => (),
                     }
                 },
-                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"fills" => loop {
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == "fills" => loop {
                     inner_buf.clear();
                     match xml.read_event_into(&mut inner_buf) {
-                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"fill" => {
+                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == "fill" => {
                             let fill = style_parser::parse_fill(
                                 &mut xml,
                                 e,
@@ -852,16 +834,16 @@ impl<RS: Read + Seek> Xlsx<RS> {
                             )?;
                             fills.push(fill);
                         }
-                        Ok(Event::End(ref e)) if e.local_name().as_ref() == b"fills" => break,
+                        Ok(Event::End(ref e)) if e.local_name().as_ref() == "fills" => break,
                         Ok(Event::Eof) => return Err(XlsxError::XmlEof("fills")),
                         Err(e) => return Err(XlsxError::Xml(e)),
                         _ => (),
                     }
                 },
-                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"borders" => loop {
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == "borders" => loop {
                     inner_buf.clear();
                     match xml.read_event_into(&mut inner_buf) {
-                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"border" => {
+                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == "border" => {
                             let border = style_parser::parse_border(
                                 &mut xml,
                                 e,
@@ -870,16 +852,16 @@ impl<RS: Read + Seek> Xlsx<RS> {
                             )?;
                             borders.push(border);
                         }
-                        Ok(Event::End(ref e)) if e.local_name().as_ref() == b"borders" => break,
+                        Ok(Event::End(ref e)) if e.local_name().as_ref() == "borders" => break,
                         Ok(Event::Eof) => return Err(XlsxError::XmlEof("borders")),
                         Err(e) => return Err(XlsxError::Xml(e)),
                         _ => (),
                     }
                 },
-                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"cellStyleXfs" => loop {
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == "cellStyleXfs" => loop {
                     inner_buf.clear();
                     match xml.read_event_into(&mut inner_buf) {
-                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"xf" => {
+                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == "xf" => {
                             let (style, format) = parse_xf_record(
                                 &mut xml,
                                 e,
@@ -892,7 +874,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                             cell_style_xfs.push(style);
                             cell_style_formats.push(format);
                         }
-                        Ok(Event::End(ref e)) if e.local_name().as_ref() == b"cellStyleXfs" => {
+                        Ok(Event::End(ref e)) if e.local_name().as_ref() == "cellStyleXfs" => {
                             break
                         }
                         Ok(Event::Eof) => return Err(XlsxError::XmlEof("cellStyleXfs")),
@@ -900,14 +882,14 @@ impl<RS: Read + Seek> Xlsx<RS> {
                         _ => (),
                     }
                 },
-                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"cellXfs" => loop {
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == "cellXfs" => loop {
                     inner_buf.clear();
                     match xml.read_event_into(&mut inner_buf) {
-                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"xf" => {
+                        Ok(Event::Start(ref e)) if e.local_name().as_ref() == "xf" => {
                             // Start from the referenced named-style XF. Explicitly
                             // disabled cell-XF components retain this base value.
-                            let base_style_id = get_attribute(e.attributes(), QName(b"xfId"))?
-                                .and_then(|value| atoi_simd::parse::<usize>(value).ok());
+                            let base_style_id = get_attribute(e.attributes(), QName("xfId"))?
+                                .and_then(|value| atoi_simd::parse::<usize>(value.as_bytes()).ok());
                             let mut style = base_style_id
                                 .and_then(|style_id| cell_style_xfs.get(style_id))
                                 .cloned()
@@ -933,40 +915,40 @@ impl<RS: Read + Seek> Xlsx<RS> {
                             for a in e.attributes() {
                                 let a = a?;
                                 match a.key.as_ref() {
-                                    b"fontId" => {
+                                    "fontId" => {
                                         font_id =
-                                            xml.decoder().decode(&a.value)?.parse::<usize>().ok();
+                                            a.value.parse::<usize>().ok();
                                     }
-                                    b"fillId" => {
+                                    "fillId" => {
                                         fill_id =
-                                            xml.decoder().decode(&a.value)?.parse::<usize>().ok();
+                                            a.value.parse::<usize>().ok();
                                     }
-                                    b"borderId" => {
+                                    "borderId" => {
                                         border_id =
-                                            xml.decoder().decode(&a.value)?.parse::<usize>().ok();
+                                            a.value.parse::<usize>().ok();
                                     }
-                                    b"numFmtId" => {
+                                    "numFmtId" => {
                                         // Store for both Style and CellFormat after
                                         // applyNumberFormat has been considered.
-                                        num_fmt_id_bytes = Some(a.value.to_vec());
+                                        num_fmt_id_bytes = Some(a.value.as_bytes().to_vec());
                                     }
-                                    b"applyFont" => {
+                                    "applyFont" => {
                                         apply_font = style_parser::parse_ooxml_bool(&a.value)?;
                                     }
-                                    b"applyFill" => {
+                                    "applyFill" => {
                                         apply_fill = style_parser::parse_ooxml_bool(&a.value)?;
                                     }
-                                    b"applyBorder" => {
+                                    "applyBorder" => {
                                         apply_border = style_parser::parse_ooxml_bool(&a.value)?;
                                     }
-                                    b"applyNumberFormat" => {
+                                    "applyNumberFormat" => {
                                         apply_number_format =
                                             style_parser::parse_ooxml_bool(&a.value)?;
                                     }
-                                    b"applyAlignment" => {
+                                    "applyAlignment" => {
                                         apply_alignment = style_parser::parse_ooxml_bool(&a.value)?;
                                     }
-                                    b"applyProtection" => {
+                                    "applyProtection" => {
                                         apply_protection =
                                             style_parser::parse_ooxml_bool(&a.value)?;
                                     }
@@ -998,7 +980,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                     None => builtin_format_by_id(id_bytes),
                                 };
                                 if let Ok(num_fmt_id) =
-                                    xml.decoder().decode(id_bytes)?.parse::<u32>()
+                                    atoi_simd::parse::<u32>(id_bytes)
                                 {
                                     let format_code = match number_formats.get(id_bytes) {
                                         Some(raw) => raw.clone(),
@@ -1023,14 +1005,14 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                         .local_name()
                                         .as_ref()
                                     {
-                                        b"alignment" => {
+                                        "alignment" => {
                                             let alignment =
                                                 style_parser::parse_alignment(&mut xml, nested_e)?;
                                             if apply_alignment {
                                                 style = style.with_alignment(alignment);
                                             }
                                         }
-                                        b"protection" => {
+                                        "protection" => {
                                             let protection =
                                                 style_parser::parse_protection(&mut xml, nested_e)?;
                                             if apply_protection {
@@ -1043,7 +1025,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                         }
                                     },
                                     Ok(Event::End(ref end_e))
-                                        if end_e.local_name().as_ref() == b"xf" =>
+                                        if end_e.local_name().as_ref() == "xf" =>
                                     {
                                         break
                                     }
@@ -1056,13 +1038,13 @@ impl<RS: Read + Seek> Xlsx<RS> {
                             self.styles.push(style);
                             self.formats.push(cell_format);
                         }
-                        Ok(Event::End(e)) if e.local_name().as_ref() == b"cellXfs" => break,
+                        Ok(Event::End(e)) if e.local_name().as_ref() == "cellXfs" => break,
                         Ok(Event::Eof) => return Err(XlsxError::XmlEof("cellXfs")),
                         Err(e) => return Err(XlsxError::Xml(e)),
                         _ => (),
                     }
                 },
-                Ok(Event::End(e)) if e.local_name().as_ref() == b"styleSheet" => break,
+                Ok(Event::End(e)) if e.local_name().as_ref() == "styleSheet" => break,
                 Ok(Event::Eof) => return Err(XlsxError::XmlEof("styleSheet")),
                 Err(e) => return Err(XlsxError::Xml(e)),
                 _ => (),
@@ -1082,7 +1064,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
         loop {
             buf.clear();
             match xml.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) if e.local_name().as_ref() == b"sheet" => {
+                Ok(Event::Start(e)) if e.local_name().as_ref() == "sheet" => {
                     let mut name = String::new();
                     let mut path = String::new();
                     let mut visible = SheetVisible::Visible;
@@ -1090,16 +1072,18 @@ impl<RS: Read + Seek> Xlsx<RS> {
                         let a = a?;
                         match a {
                             Attribute {
-                                key: QName(b"name"),
+                                key: QName("name"),
                                 ..
                             } => {
-                                name = a.decode_and_unescape_value(xml.decoder())?.to_string();
+                                name = quick_xml::escape::unescape(&a.value)
+                                    .map_err(quick_xml::Error::from)?.into_owned();
                             }
                             Attribute {
-                                key: QName(b"state"),
+                                key: QName("state"),
                                 ..
                             } => {
-                                visible = match a.decode_and_unescape_value(xml.decoder())?.as_ref()
+                                visible = match quick_xml::escape::unescape(&a.value)
+                                    .map_err(quick_xml::Error::from)?.as_ref()
                                 {
                                     "visible" => SheetVisible::Visible,
                                     "hidden" => SheetVisible::Hidden,
@@ -1113,12 +1097,12 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                 }
                             }
                             Attribute {
-                                key: QName(b"r:id" | b"relationships:id"),
+                                key: QName("r:id" | "relationships:id"),
                                 value: v,
                             } => {
                                 let target = relationships
                                     .targets
-                                    .get(&*v)
+                                    .get(v.as_bytes())
                                     .ok_or(XlsxError::RelationshipNotFound)?;
                                 path = resolve_workbook_relationship_target(target)?;
                             }
@@ -1143,28 +1127,30 @@ impl<RS: Read + Seek> Xlsx<RS> {
                     });
                     self.sheets.push((name, path));
                 }
-                Ok(Event::Start(e)) if e.name().as_ref() == b"workbookPr" => {
+                Ok(Event::Start(e)) if e.name().as_ref() == "workbookPr" => {
                     self.is_1904 = match e.try_get_attribute("date1904")? {
                         Some(c) => ["1", "true"].contains(
-                            &c.decode_and_unescape_value(xml.decoder())
-                                .map_err(XlsxError::Xml)?
+                            &quick_xml::escape::unescape(&c.value)
+                                .map_err(quick_xml::Error::from)?
                                 .as_ref(),
                         ),
                         None => false,
                     };
                 }
-                Ok(Event::Start(e)) if e.local_name().as_ref() == b"definedName" => {
+                Ok(Event::Start(e)) if e.local_name().as_ref() == "definedName" => {
                     if let Some(a) = e
                         .attributes()
                         .filter_map(std::result::Result::ok)
-                        .find(|a| a.key == QName(b"name"))
+                        .find(|a| a.key == QName("name"))
                     {
-                        let name = a.decode_and_unescape_value(xml.decoder())?.to_string();
+                        let name = quick_xml::escape::unescape(&a.value)
+                            .map_err(quick_xml::Error::from)?.into_owned();
                         val_buf.clear();
                         let mut value = String::new();
                         loop {
                             match xml.read_event_into(&mut val_buf)? {
-                                Event::Text(t) => value.push_str(&t.xml10_content()?),
+                                Event::Text(t) => value.push_str(&t.xml10_content()),
+                                Event::CData(t) => value.push_str(&t.xml10_content()),
                                 Event::GeneralRef(e) => unescape_entity_to_buffer(&e, &mut value)?,
                                 Event::End(end) if end.name() == e.name() => break,
                                 Event::Eof => return Err(XlsxError::XmlEof("workbook")),
@@ -1174,7 +1160,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                         defined_names.push((name, value));
                     }
                 }
-                Ok(Event::End(e)) if e.local_name().as_ref() == b"workbook" => break,
+                Ok(Event::End(e)) if e.local_name().as_ref() == "workbook" => break,
                 Ok(Event::Eof) => return Err(XlsxError::XmlEof("workbook")),
                 Err(e) => return Err(XlsxError::Xml(e)),
                 _ => (),
@@ -1199,7 +1185,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
         loop {
             buf.clear();
             match xml.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) if e.local_name().as_ref() == b"Relationship" => {
+                Ok(Event::Start(e)) if e.local_name().as_ref() == "Relationship" => {
                     let mut id = Vec::new();
                     let mut target = String::new();
                     let mut relationship_type = String::new();
@@ -1207,20 +1193,18 @@ impl<RS: Read + Seek> Xlsx<RS> {
                     for attribute in e.attributes() {
                         let attribute = attribute?;
                         match attribute.key.as_ref() {
-                            b"Id" => id.extend_from_slice(&attribute.value),
-                            b"Target" => {
-                                target = attribute
-                                    .decode_and_unescape_value(xml.decoder())?
-                                    .into_owned();
+                            "Id" => id.extend_from_slice(attribute.value.as_bytes()),
+                            "Target" => {
+                                target = quick_xml::escape::unescape(&attribute.value)
+                                    .map_err(quick_xml::Error::from)?.into_owned();
                             }
-                            b"Type" => {
-                                relationship_type = attribute
-                                    .decode_and_unescape_value(xml.decoder())?
-                                    .into_owned();
+                            "Type" => {
+                                relationship_type = quick_xml::escape::unescape(&attribute.value)
+                                    .map_err(quick_xml::Error::from)?.into_owned();
                             }
-                            b"TargetMode" => {
-                                external = attribute
-                                    .decode_and_unescape_value(xml.decoder())?
+                            "TargetMode" => {
+                                external = quick_xml::escape::unescape(&attribute.value)
+                                    .map_err(quick_xml::Error::from)?
                                     .eq_ignore_ascii_case("external");
                             }
                             _ => {}
@@ -1231,7 +1215,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                     }
                     targets.insert(id, target);
                 }
-                Ok(Event::End(e)) if e.local_name().as_ref() == b"Relationships" => break,
+                Ok(Event::End(e)) if e.local_name().as_ref() == "Relationships" => break,
                 Ok(Event::Eof) => return Err(XlsxError::XmlEof("Relationships")),
                 Err(e) => return Err(XlsxError::Xml(e)),
                 _ => (),
@@ -1280,24 +1264,24 @@ impl<RS: Read + Seek> Xlsx<RS> {
                 loop {
                     buf.clear();
                     match xml.read_event_into(&mut buf) {
-                        Ok(Event::Start(e)) if e.local_name().as_ref() == b"Relationship" => {
+                        Ok(Event::Start(e)) if e.local_name().as_ref() == "Relationship" => {
                             let mut id = Vec::new();
                             let mut target = String::new();
                             let mut table_type = false;
                             for a in e.attributes() {
                                 match a? {
                                     Attribute {
-                                        key: QName(b"Id"),
+                                        key: QName("Id"),
                                         value: v,
-                                    } => id.extend_from_slice(&v),
+                                    } => id.extend_from_slice(v.as_bytes()),
                                     Attribute {
-                                        key: QName(b"Target"),
+                                        key: QName("Target"),
                                         value: v,
-                                    } => target = xml.decoder().decode(&v)?.into_owned(),
+                                    } => target = v.into_owned(),
                                     Attribute {
-                                        key: QName(b"Type"),
+                                        key: QName("Type"),
                                         value: v,
-                                    } => table_type = *v == b"http://schemas.openxmlformats.org/officeDocument/2006/relationships/table"[..],
+                                    } => table_type = v == "http://schemas.openxmlformats.org/officeDocument/2006/relationships/table",
                                     _ => (),
                                 }
                             }
@@ -1318,7 +1302,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                 }
                             }
                         }
-                        Ok(Event::End(e)) if e.local_name().as_ref() == b"Relationships" => break,
+                        Ok(Event::End(e)) if e.local_name().as_ref() == "Relationships" => break,
                         Ok(Event::Eof) => return Err(XlsxError::XmlEof("Relationships")),
                         Err(e) => return Err(XlsxError::Xml(e)),
                         _ => (),
@@ -1335,53 +1319,53 @@ impl<RS: Read + Seek> Xlsx<RS> {
                 loop {
                     buf.clear();
                     match xml.read_event_into(&mut buf) {
-                        Ok(Event::Start(e)) if e.local_name().as_ref() == b"table" => {
+                        Ok(Event::Start(e)) if e.local_name().as_ref() == "table" => {
                             for a in e.attributes() {
                                 match a? {
                                     Attribute {
-                                        key: QName(b"displayName"),
+                                        key: QName("displayName"),
                                         value: v,
                                     } => {
                                         table_meta.display_name =
-                                            xml.decoder().decode(&v)?.into_owned();
+                                            v.into_owned();
                                     }
                                     Attribute {
-                                        key: QName(b"ref"),
+                                        key: QName("ref"),
                                         value: v,
                                     } => {
                                         table_meta.ref_cells =
-                                            xml.decoder().decode(&v)?.into_owned();
+                                            v.into_owned();
                                     }
                                     Attribute {
-                                        key: QName(b"headerRowCount"),
+                                        key: QName("headerRowCount"),
                                         value: v,
                                     } => {
                                         table_meta.header_row_count =
-                                            xml.decoder().decode(&v)?.parse()?;
+                                            v.parse()?;
                                     }
                                     Attribute {
-                                        key: QName(b"totalsRowCount"),
+                                        key: QName("totalsRowCount"),
                                         value: v,
                                     } => {
                                         table_meta.totals_row_count =
-                                            xml.decoder().decode(&v)?.parse()?;
+                                            v.parse()?;
                                     }
                                     _ => (),
                                 }
                             }
                         }
-                        Ok(Event::Start(e)) if e.local_name().as_ref() == b"tableColumn" => {
+                        Ok(Event::Start(e)) if e.local_name().as_ref() == "tableColumn" => {
                             for a in e.attributes().flatten() {
                                 if let Attribute {
-                                    key: QName(b"name"),
+                                    key: QName("name"),
                                     value: v,
                                 } = a
                                 {
-                                    column_names.push(xml.decoder().decode(&v)?.into_owned());
+                                    column_names.push(v.into_owned());
                                 }
                             }
                         }
-                        Ok(Event::End(e)) if e.local_name().as_ref() == b"table" => break,
+                        Ok(Event::End(e)) if e.local_name().as_ref() == "table" => break,
                         Ok(Event::Eof) => return Err(XlsxError::XmlEof("Table")),
                         Err(e) => return Err(XlsxError::Xml(e)),
                         _ => (),
@@ -1476,7 +1460,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
     /// An example of retrieving pivot data for a Pivot Table named PivotTable1 on sheet PivotSheet1.
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///
@@ -1525,9 +1509,9 @@ impl<RS: Read + Seek> Xlsx<RS> {
                 loop {
                     buf.clear();
                     match xml.read_event_into(&mut buf) {
-                        Ok(Event::Start(e)) if e.local_name() == QName(b"mergeCell").into() => {
-                            if let Some(attr) = get_attribute(e.attributes(), QName(b"ref"))? {
-                                let dimension = get_dimension(attr)?;
+                        Ok(Event::Start(e)) if e.local_name() == QName("mergeCell").into() => {
+                            if let Some(attr) = get_attribute(e.attributes(), QName("ref"))? {
+                                let dimension = get_dimension(attr.as_bytes())?;
                                 regions.push((
                                     sheet_name.to_string(),
                                     sheet_path.to_string(),
@@ -1612,7 +1596,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
     /// An example of getting all the merged regions in an Excel workbook.
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = "tests/merged_range.xlsx";
@@ -1681,7 +1665,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
     /// worksheet.
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Reader, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Reader, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = "tests/merged_range.xlsx";
@@ -1794,7 +1778,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
     /// An example of getting the names of all the tables in an Excel workbook.
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = "tests/table-multiple.xlsx";
@@ -1847,7 +1831,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
     /// sheet by sheet.
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Reader, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Reader, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = "tests/table-multiple.xlsx";
@@ -1917,7 +1901,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
     /// gets an owned copy of the worksheet data in the table area.
     ///
     /// ```
-    /// use calamine::{open_workbook, Data, Error, Xlsx};
+    /// use calamine_styles::{open_workbook, Data, Error, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = "tests/table-multiple.xlsx";
@@ -1991,7 +1975,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
     /// gets a borrowed/referenced copy of the worksheet data in the table area.
     ///
     /// ```
-    /// use calamine::{open_workbook, DataRef, Error, Xlsx};
+    /// use calamine_styles::{open_workbook, DataRef, Error, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = "tests/table-multiple.xlsx";
@@ -2062,7 +2046,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
     /// individual worksheet.
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Reader, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Reader, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = "tests/merged_range.xlsx";
@@ -2132,7 +2116,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                 buffer.clear();
 
                 match xml.read_event_into(&mut buffer) {
-                    Ok(Event::Start(event)) if event.local_name().as_ref() == b"mergeCells" => {
+                    Ok(Event::Start(event)) if event.local_name().as_ref() == "mergeCells" => {
                         if let Ok(cells) = read_merge_cells(&mut xml) {
                             merge_cells = cells;
                         }
@@ -2173,7 +2157,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
     /// worksheet index.
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = "tests/merged_range.xlsx";
@@ -2243,7 +2227,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
     /// An example of getting the cells reader for a worksheet.
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = "tests/merged_range.xlsx";
@@ -2376,37 +2360,33 @@ impl<RS: Read + Seek> Xlsx<RS> {
             buf.clear();
             match xml.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e) | Event::Empty(ref e))
-                    if e.local_name().as_ref() == b"sheetFormatPr" =>
+                    if e.local_name().as_ref() == "sheetFormatPr" =>
                 {
                     // Parse default column width and row height
                     for attr in e.attributes() {
                         let attr = attr.map_err(XlsxError::XmlAttr)?;
                         match attr.key.as_ref() {
-                            b"defaultColWidth" => {
-                                if let Ok(width_str) = xml.decoder().decode(&attr.value) {
-                                    if let Ok(width) = width_str.parse::<f64>() {
-                                        layout = layout.with_default_column_width(width);
-                                    }
+                            "defaultColWidth" => {
+                                if let Ok(width) = attr.value.parse::<f64>() {
+                                    layout = layout.with_default_column_width(width);
                                 }
                             }
-                            b"defaultRowHeight" => {
-                                if let Ok(height_str) = xml.decoder().decode(&attr.value) {
-                                    if let Ok(height) = height_str.parse::<f64>() {
-                                        layout = layout.with_default_row_height(height);
-                                    }
+                            "defaultRowHeight" => {
+                                if let Ok(height) = attr.value.parse::<f64>() {
+                                    layout = layout.with_default_row_height(height);
                                 }
                             }
                             _ => {}
                         }
                     }
                 }
-                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"cols" => {
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == "cols" => {
                     // Parse column definitions
                     loop {
                         buf.clear();
                         match xml.read_event_into(&mut buf) {
                             Ok(Event::Start(ref col_e) | Event::Empty(ref col_e))
-                                if col_e.local_name().as_ref() == b"col" =>
+                                if col_e.local_name().as_ref() == "col" =>
                             {
                                 let mut min_column = None;
                                 let mut max_column = None;
@@ -2418,36 +2398,29 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                 for attr in col_e.attributes() {
                                     let attr = attr.map_err(XlsxError::XmlAttr)?;
                                     match attr.key.as_ref() {
-                                        b"min" => {
-                                            if let Ok(value) = xml.decoder().decode(&attr.value) {
-                                                min_column = value.parse::<u32>().ok();
-                                            }
+                                        "min" => {
+                                            min_column = attr.value.parse::<u32>().ok();
                                         }
-                                        b"max" => {
-                                            if let Ok(value) = xml.decoder().decode(&attr.value) {
-                                                max_column = value.parse::<u32>().ok();
-                                            }
+                                        "max" => {
+                                            max_column = attr.value.parse::<u32>().ok();
                                         }
-                                        b"width" => {
+                                        "width" => {
                                             // Preserve the historical fallback for a malformed
                                             // width attribute while keeping an absent attribute
                                             // distinct from an explicit width of zero.
                                             width = Some(0.0);
-                                            if let Ok(width_str) = xml.decoder().decode(&attr.value)
-                                            {
-                                                if let Ok(w) = width_str.parse::<f64>() {
-                                                    width = Some(w);
-                                                }
+                                            if let Ok(w) = attr.value.parse::<f64>() {
+                                                width = Some(w);
                                             }
                                         }
-                                        b"customWidth" => {
+                                        "customWidth" => {
                                             custom_width =
                                                 style_parser::parse_ooxml_bool(&attr.value)?;
                                         }
-                                        b"hidden" => {
+                                        "hidden" => {
                                             hidden = style_parser::parse_ooxml_bool(&attr.value)?;
                                         }
-                                        b"bestFit" => {
+                                        "bestFit" => {
                                             best_fit = style_parser::parse_ooxml_bool(&attr.value)?;
                                         }
                                         _ => {}
@@ -2467,7 +2440,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                     }
                                 }
                             }
-                            Ok(Event::End(ref end_e)) if end_e.local_name().as_ref() == b"cols" => {
+                            Ok(Event::End(ref end_e)) if end_e.local_name().as_ref() == "cols" => {
                                 break;
                             }
                             Ok(Event::Eof) => return Err(XlsxError::XmlEof("cols")),
@@ -2476,14 +2449,14 @@ impl<RS: Read + Seek> Xlsx<RS> {
                         }
                     }
                 }
-                Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"sheetData" => {
+                Ok(Event::Start(ref e)) if e.local_name().as_ref() == "sheetData" => {
                     // Parse row definitions
                     let mut next_implicit_row = 0u32;
                     loop {
                         buf.clear();
                         match xml.read_event_into(&mut buf) {
                             Ok(Event::Start(ref row_e))
-                                if row_e.local_name().as_ref() == b"row" =>
+                                if row_e.local_name().as_ref() == "row" =>
                             {
                                 let mut row_num = next_implicit_row;
                                 let mut height = None;
@@ -2496,8 +2469,8 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                 for attr in row_e.attributes() {
                                     let attr = attr.map_err(XlsxError::XmlAttr)?;
                                     match attr.key.as_ref() {
-                                        b"r" => {
-                                            let row_str = xml.decoder().decode(&attr.value)?;
+                                        "r" => {
+                                            let row_str = &attr.value;
                                             let one_based_row = row_str.parse::<u32>()?;
                                             row_num = one_based_row.checked_sub(1).ok_or(
                                                 XlsxError::Unexpected(
@@ -2505,34 +2478,30 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                                 ),
                                             )?;
                                         }
-                                        b"ht" => {
+                                        "ht" => {
                                             // Preserve the historical fallback for a malformed
                                             // height attribute while keeping an absent attribute
                                             // distinct from an explicit height of zero.
                                             height = Some(0.0);
-                                            if let Ok(height_str) =
-                                                xml.decoder().decode(&attr.value)
-                                            {
-                                                if let Ok(h) = height_str.parse::<f64>() {
-                                                    // Match the previous acceptance of positive
-                                                    // values while also retaining a valid zero.
-                                                    has_explicit_height = h >= 0.0;
-                                                    height = Some(h);
-                                                }
+                                            if let Ok(h) = attr.value.parse::<f64>() {
+                                                // Match the previous acceptance of positive
+                                                // values while also retaining a valid zero.
+                                                has_explicit_height = h >= 0.0;
+                                                height = Some(h);
                                             }
                                         }
-                                        b"customHeight" => {
+                                        "customHeight" => {
                                             custom_height =
                                                 style_parser::parse_ooxml_bool(&attr.value)?;
                                         }
-                                        b"hidden" => {
+                                        "hidden" => {
                                             hidden = style_parser::parse_ooxml_bool(&attr.value)?;
                                         }
-                                        b"thickTop" => {
+                                        "thickTop" => {
                                             thick_top =
                                                 style_parser::parse_ooxml_bool(&attr.value)?;
                                         }
-                                        b"thickBot" => {
+                                        "thickBot" => {
                                             thick_bottom =
                                                 style_parser::parse_ooxml_bool(&attr.value)?;
                                         }
@@ -2567,7 +2536,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
                                 xml.read_to_end_into(row_e.name(), &mut Vec::new())?;
                             }
                             Ok(Event::End(ref end_e))
-                                if end_e.local_name().as_ref() == b"sheetData" =>
+                                if end_e.local_name().as_ref() == "sheetData" =>
                             {
                                 break;
                             }
@@ -2829,7 +2798,10 @@ fn xml_reader<'a, RS: Read + Seek>(
 
     match zip.by_name(&zip_path) {
         Ok(f) => {
-            let mut r = XmlReader::from_reader(BufReader::new(f));
+            let mut r = match crate::utils::xml_reader(BufReader::new(f)) {
+                Ok(reader) => reader,
+                Err(error) => return Some(Err(error.into())),
+            };
             let config = r.config_mut();
             config.check_end_names = false;
             config.trim_text(false);
@@ -2846,7 +2818,7 @@ fn xml_reader<'a, RS: Read + Seek>(
 pub(crate) fn get_attribute<'a>(
     atts: Attributes<'a>,
     n: QName,
-) -> Result<Option<&'a [u8]>, XlsxError> {
+) -> Result<Option<&'a str>, XlsxError> {
     for a in atts {
         match a {
             Ok(Attribute {
@@ -2984,13 +2956,13 @@ where
         match xml.read_event_into(&mut buf) {
             Ok(Event::Start(e) | Event::Empty(e)) => {
                 match e.local_name().as_ref() {
-                    b"b" => {
+                    "b" => {
                         // The element itself is significant even when it
                         // explicitly disables inherited bold formatting.
                         let mut bold = true;
                         for attribute in e.attributes() {
                             let attribute = attribute?;
-                            if attribute.key.as_ref() == b"val" {
+                            if attribute.key.as_ref() == "val" {
                                 bold = style_parser::parse_ooxml_bool(&attribute.value)?;
                                 break;
                             }
@@ -3003,11 +2975,11 @@ where
                         has_any_props = true;
                         has_rich_formatting = true;
                     }
-                    b"i" => {
+                    "i" => {
                         let mut italic = true;
                         for attribute in e.attributes() {
                             let attribute = attribute?;
-                            if attribute.key.as_ref() == b"val" {
+                            if attribute.key.as_ref() == "val" {
                                 italic = style_parser::parse_ooxml_bool(&attribute.value)?;
                                 break;
                             }
@@ -3020,13 +2992,13 @@ where
                         has_any_props = true;
                         has_rich_formatting = true;
                     }
-                    b"u" => {
+                    "u" => {
                         // Underline
                         let mut underline = UnderlineStyle::Single;
                         for attribute in e.attributes() {
                             let attribute = attribute?;
-                            if attribute.key.as_ref() == b"val" {
-                                let val = String::from_utf8_lossy(&attribute.value);
+                            if attribute.key.as_ref() == "val" {
+                                let val = &attribute.value;
                                 underline = match val.as_ref() {
                                     "double" => UnderlineStyle::Double,
                                     "singleAccounting" => UnderlineStyle::SingleAccounting,
@@ -3041,11 +3013,11 @@ where
                         has_any_props = true;
                         has_rich_formatting = true;
                     }
-                    b"strike" => {
+                    "strike" => {
                         let mut strikethrough = true;
                         for attribute in e.attributes() {
                             let attribute = attribute?;
-                            if attribute.key.as_ref() == b"val" {
+                            if attribute.key.as_ref() == "val" {
                                 strikethrough = style_parser::parse_ooxml_bool(&attribute.value)?;
                                 break;
                             }
@@ -3054,13 +3026,11 @@ where
                         has_any_props = true;
                         has_rich_formatting = true;
                     }
-                    b"sz" => {
+                    "sz" => {
                         // Font size is run formatting even when no emphasis flag is set
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"val" {
-                                if let Ok(size) =
-                                    String::from_utf8_lossy(&attr.value).parse::<f64>()
-                                {
+                            if attr.key.as_ref() == "val" {
+                                if let Ok(size) = attr.value.parse::<f64>() {
                                     font = font.with_size(size);
                                     has_any_props = true;
                                     has_rich_formatting = true;
@@ -3068,7 +3038,7 @@ where
                             }
                         }
                     }
-                    b"color" => {
+                    "color" => {
                         // Font color - counts as rich formatting
                         if let Some(color) = parse_run_color(&e, theme_colors, indexed_colors)? {
                             font = font.with_color(color);
@@ -3076,23 +3046,23 @@ where
                             has_rich_formatting = true;
                         }
                     }
-                    b"rFont" => {
+                    "rFont" => {
                         // Font name is run formatting even when no emphasis flag is set
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"val" {
-                                font = font
-                                    .with_name(String::from_utf8_lossy(&attr.value).to_string());
+                            if attr.key.as_ref() == "val" {
+                                font = font.with_name(quick_xml::escape::unescape(&attr.value)
+                                    .map_err(quick_xml::Error::from)?.into_owned());
                                 has_any_props = true;
                                 has_rich_formatting = true;
                             }
                         }
                     }
-                    b"family" => {
+                    "family" => {
                         // Font family is run formatting even when no emphasis flag is set
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"val" {
-                                font = font
-                                    .with_family(String::from_utf8_lossy(&attr.value).to_string());
+                            if attr.key.as_ref() == "val" {
+                                font = font.with_family(quick_xml::escape::unescape(&attr.value)
+                                    .map_err(quick_xml::Error::from)?.into_owned());
                                 has_any_props = true;
                                 has_rich_formatting = true;
                             }
@@ -3151,16 +3121,16 @@ where
     loop {
         buf.clear();
         match xml.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"r" => {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == "r" => {
                 // Start of a rich text run
                 is_rich_text = true;
                 current_props = None;
             }
-            Ok(Event::End(e)) if e.local_name().as_ref() == b"r" => {
+            Ok(Event::End(e)) if e.local_name().as_ref() == "r" => {
                 // End of a rich text run
                 current_props = None;
             }
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"rPr" => {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == "rPr" => {
                 // Run properties (formatting)
                 current_props = parse_run_properties(xml, e.name(), theme_colors, indexed_colors)?;
                 if let Some(ref props) = current_props {
@@ -3169,10 +3139,10 @@ where
                     }
                 }
             }
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"rPh" => {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == "rPh" => {
                 is_phonetic_text = true;
             }
-            Ok(Event::End(e)) if e.local_name().as_ref() == b"rPh" => {
+            Ok(Event::End(e)) if e.local_name().as_ref() == "rPh" => {
                 is_phonetic_text = false;
             }
             Ok(Event::End(e)) if e.name() == closing => {
@@ -3196,19 +3166,21 @@ where
                     return Ok(Some(Data::String(String::new())));
                 }
             }
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"t" && !is_phonetic_text => {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == "t" && !is_phonetic_text => {
                 // Text content
                 val_buf.clear();
                 let mut value = String::new();
                 loop {
                     match xml.read_event_into(&mut val_buf)? {
-                        Event::Text(t) => value.push_str(&unescape_xml(&t.xml10_content()?)),
+                        Event::Text(t) => value.push_str(&t.xml10_content()),
+                        Event::CData(t) => value.push_str(&t.xml10_content()),
                         Event::GeneralRef(e) => unescape_entity_to_buffer(&e, &mut value)?,
                         Event::End(end) if end.name() == e.name() => break,
                         Event::Eof => return Err(XlsxError::XmlEof("t")),
                         _ => (),
                     }
                 }
+                let value = unescape_xml(&value).into_owned();
 
                 if is_rich_text {
                     // Add as a run with optional formatting
@@ -3260,19 +3232,19 @@ where
         let mut buffer = Vec::new();
 
         match xml.read_event_into(&mut buffer) {
-            Ok(Event::Start(event)) if event.local_name().as_ref() == b"mergeCell" => {
+            Ok(Event::Start(event)) if event.local_name().as_ref() == "mergeCell" => {
                 for attribute in event.attributes() {
                     let attribute = attribute?;
 
-                    if attribute.key == QName(b"ref") {
-                        let dimensions = get_dimension(&attribute.value)?;
+                    if attribute.key == QName("ref") {
+                        let dimensions = get_dimension(attribute.value.as_bytes())?;
                         merge_cells.push(dimensions);
 
                         break;
                     }
                 }
             }
-            Ok(Event::End(event)) if event.local_name().as_ref() == b"mergeCells" => {
+            Ok(Event::End(event)) if event.local_name().as_ref() == "mergeCells" => {
                 break;
             }
             Ok(Event::Eof) => return Err(XlsxError::XmlEof("")),
@@ -3617,24 +3589,24 @@ enum Tag {
     D,
 }
 
-type Value = Option<Box<[u8]>>;
+type Value = Option<Box<str>>;
 
 /// Check if tag is an item within a PivotCache Record, which does not require a Definitions lookup.
 fn item_tag(e: &BytesStart) -> Option<Tag> {
     match e.local_name().as_ref() {
-        b"s" => Some(Tag::S),
-        b"n" => Some(Tag::N),
-        b"m" => Some(Tag::M),
-        b"e" => Some(Tag::E),
-        b"b" => Some(Tag::B),
-        b"d" => Some(Tag::D),
+        "s" => Some(Tag::S),
+        "n" => Some(Tag::N),
+        "m" => Some(Tag::M),
+        "e" => Some(Tag::E),
+        "b" => Some(Tag::B),
+        "d" => Some(Tag::D),
         _ => None,
     }
 }
 fn item_value(e: &BytesStart) -> Result<Value, AttrError> {
     for a in e.attributes() {
         if let Attribute {
-            key: QName(b"v"),
+            key: QName("v"),
             value,
         } = a?
         {
@@ -3663,19 +3635,19 @@ where
     loop {
         buf.clear();
         match xml.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"Relationship" => {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == "Relationship" => {
                 let mut target = String::new();
                 let mut is_pivot_cache_definitions_type = false;
                 for a in e.attributes() {
                     match a? {
                             Attribute {
-                                key: QName(b"Target"),
+                                key: QName("Target"),
                                 value: v,
-                            } => target = xml.decoder().decode(&v)?.into_owned(),
+                            } => target = v.into_owned(),
                             Attribute {
-                                key: QName(b"Type"),
+                                key: QName("Type"),
                                 value: v,
-                            } => is_pivot_cache_definitions_type = *v == b"http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition"[..],
+                            } => is_pivot_cache_definitions_type = v == "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition",
                             _ => (),
                         }
                 }
@@ -3697,7 +3669,7 @@ where
                     _ => {}
                 }
             }
-            Ok(Event::End(e)) if e.local_name().as_ref() == b"Relationships" => break,
+            Ok(Event::End(e)) if e.local_name().as_ref() == "Relationships" => break,
             Ok(Event::Eof) => return Err(XlsxError::XmlEof("Relationships")),
             Err(e) => return Err(XlsxError::Xml(e)),
             _ => (),
@@ -3730,19 +3702,19 @@ where
     loop {
         buf.clear();
         match xml.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"Relationship" => {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == "Relationship" => {
                 let mut target = String::new();
                 let mut is_pivot_cache_record_type = false;
                 for a in e.attributes() {
                     match a? {
                             Attribute {
-                                key: QName(b"Target"),
+                                key: QName("Target"),
                                 value: v,
-                            } => target = xml.decoder().decode(&v)?.into_owned(),
+                            } => target = v.into_owned(),
                             Attribute {
-                                key: QName(b"Type"),
+                                key: QName("Type"),
                                 value: v,
-                            } => is_pivot_cache_record_type = *v == b"http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords"[..],
+                            } => is_pivot_cache_record_type = v == "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords",
                             _ => (),
                         }
                 }
@@ -3762,7 +3734,7 @@ where
                     _ => {}
                 }
             }
-            Ok(Event::End(e)) if e.local_name().as_ref() == b"Relationships" => break,
+            Ok(Event::End(e)) if e.local_name().as_ref() == "Relationships" => break,
             Ok(Event::Eof) => return Err(XlsxError::XmlEof("Relationships")),
             Err(e) => return Err(XlsxError::Xml(e)),
             _ => (),
@@ -3799,19 +3771,19 @@ where
     loop {
         buf.clear();
         match xml.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"Relationship" => {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == "Relationship" => {
                 let mut target = String::new();
                 let mut is_pivot_table_type = false;
                 for a in e.attributes() {
                     match a? {
                             Attribute {
-                                key: QName(b"Target"),
+                                key: QName("Target"),
                                 value: v,
-                            } => target = xml.decoder().decode(&v)?.into_owned(),
+                            } => target = v.into_owned(),
                             Attribute {
-                                key: QName(b"Type"),
+                                key: QName("Type"),
                                 value: v,
-                            } => is_pivot_table_type = *v == b"http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable"[..],
+                            } => is_pivot_table_type = v == "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable",
                             _ => (),
                         }
                 }
@@ -3827,7 +3799,7 @@ where
                     }
                 }
             }
-            Ok(Event::End(e)) if e.local_name().as_ref() == b"Relationships" => break,
+            Ok(Event::End(e)) if e.local_name().as_ref() == "Relationships" => break,
             Ok(Event::Eof) => return Err(XlsxError::XmlEof("Relationships")),
             Err(e) => return Err(XlsxError::Xml(e)),
             _ => (),
@@ -3854,10 +3826,10 @@ where
     loop {
         buf.clear();
         match xml.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"pivotTableDefinition" => {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == "pivotTableDefinition" => {
                 for a in e.attributes() {
                     if let Attribute {
-                        key: QName(b"name"),
+                        key: QName("name"),
                         value: v,
                     } = a?
                     {
@@ -3866,12 +3838,12 @@ where
                                 "multiple name entries for one pivot table path",
                             ));
                         } else {
-                            name.replace(xml.decoder().decode(&v)?.into_owned());
+                            name.replace(v.into_owned());
                         }
                     }
                 }
             }
-            Ok(Event::End(e)) if e.local_name().as_ref() == b"pivotTableDefinition" => break,
+            Ok(Event::End(e)) if e.local_name().as_ref() == "pivotTableDefinition" => break,
             Ok(Event::Eof) => return Err(XlsxError::XmlEof("pivotTableDefinition")),
             Err(e) => return Err(XlsxError::Xml(e)),
             _ => (),
@@ -3884,45 +3856,33 @@ where
 }
 
 /// Parse an item within a PivotCache Record into its appropriate [`Data`] type.
-fn parse_item(item: &(Tag, Value), decoder: &Decoder) -> Data {
+fn parse_item(item: &(Tag, Value)) -> Data {
     let Some(val) = item.1.as_deref() else {
         return Data::Empty;
     };
     match item.0 {
         Tag::M => Data::Empty,
-        Tag::S => {
-            if let Ok(val) = decoder.decode(val.as_ref()) {
-                Data::String(val.to_string())
-            } else {
-                Data::Error(CellErrorType::GettingData)
-            }
-        }
+        Tag::S => Data::String(val.to_string()),
         Tag::N => {
-            if val.contains(&b'.') {
-                match bytes_to_f64(val, decoder) {
+            if val.contains('.') {
+                match fast_float2::parse(val.as_bytes()).ok() {
                     Some(val) => Data::Float(val),
                     None => Data::Error(CellErrorType::GettingData),
                 }
             } else {
-                match bytes_to_i64(val, decoder) {
+                match atoi_simd::parse::<i64>(val.as_bytes()).ok() {
                     Some(val) => Data::Int(val),
                     None => Data::Error(CellErrorType::GettingData),
                 }
             }
         }
-        Tag::D => {
-            if let Ok(val) = decoder.decode(val) {
-                Data::DateTimeIso(val.into())
-            } else {
-                Data::Error(CellErrorType::GettingData)
-            }
-        }
+        Tag::D => Data::DateTimeIso(val.into()),
         Tag::B => {
             {
                 // boolean tags only support W3C XML Schema
                 match val {
-                    b"0" | b"false" => Data::Bool(false),
-                    b"1" | b"true" => Data::Bool(true),
+                    "0" | "false" => Data::Bool(false),
+                    "1" | "true" => Data::Bool(true),
                     _ => Data::Error(CellErrorType::GettingData),
                 }
             }
@@ -3931,23 +3891,6 @@ fn parse_item(item: &(Tag, Value), decoder: &Decoder) -> Data {
     }
 }
 
-// Parse failures are handled with None and left to `Self::parse_item` to address.
-fn bytes_to_i64(val: &[u8], decoder: &Decoder) -> Option<i64> {
-    if let Ok(val) = decoder.decode(val) {
-        atoi_simd::parse::<i64>(val.as_bytes()).ok()
-    } else {
-        None
-    }
-}
-
-// Parse failures are handled with None and left to `parse_item` to address.
-fn bytes_to_f64(val: &[u8], decoder: &Decoder) -> Option<f64> {
-    if let Ok(val) = decoder.decode(val) {
-        fast_float2::parse(val.as_bytes()).ok()
-    } else {
-        None
-    }
-}
 
 #[derive(Default)]
 pub struct PivotTables(Vec<PivotTableRef>);
@@ -3983,7 +3926,7 @@ impl PivotTables {
     /// on worksheet "PivotSheet1".
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///
@@ -4025,7 +3968,7 @@ impl PivotTables {
     /// An example of getting all pivot tables for a provided sheet.
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///
@@ -4126,18 +4069,18 @@ fn get_pivot_cache_iter<'a, RS: Read + Seek + 'a>(
             buf.clear();
 
             match xml.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) if e.local_name().as_ref() == b"cacheField" => {
+                Ok(Event::Start(e)) if e.local_name().as_ref() == "cacheField" => {
                     for a in e.attributes() {
                         match a? {
                             Attribute {
-                                key: QName(b"name"),
+                                key: QName("name"),
                                 value,
                             } => {
-                                field_names.push(xml.decoder().decode(value.as_ref())?.to_string());
+                                field_names.push(value.into_owned());
                                 fields.push(vec![]);
                             }
                             Attribute {
-                                key: QName(b"formula"),
+                                key: QName("formula"),
                                 value: _value,
                             } => {
                                 field_names.pop();
@@ -4151,7 +4094,7 @@ fn get_pivot_cache_iter<'a, RS: Read + Seek + 'a>(
                 }
                 // Exclude grouped fields from results.
                 // This does not represent the underlying data and should be removed.
-                Ok(Event::Start(e)) if e.local_name().as_ref() == b"groupItems" => {
+                Ok(Event::Start(e)) if e.local_name().as_ref() == "groupItems" => {
                     field_names.pop();
                     fields.pop();
                 }
@@ -4220,28 +4163,21 @@ impl<'a, RS: Read + Seek + 'a> Iterator for PivotCacheIter<'a, RS> {
         loop {
             buf.clear();
             match self.reader.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) if e.local_name().as_ref() == b"x" => {
+                Ok(Event::Start(e)) if e.local_name().as_ref() == "x" => {
                     for a in e.attributes() {
                         if let Ok(Attribute {
-                            key: QName(b"v"),
+                            key: QName("v"),
                             value,
                         }) = a
                         {
-                            let value_position = match self.reader.decoder().decode(value.as_ref())
-                            {
-                                Ok(val) => match val.parse::<usize>() {
-                                    Ok(val) => val,
-                                    Err(e) => {
-                                        return Some(Err(XlsxError::ParseInt(e)));
-                                    }
-                                },
-                                Err(e) => return Some(Err(XlsxError::Encoding(e))),
+                            let value_position = match value.parse::<usize>() {
+                                Ok(value) => value,
+                                Err(error) => return Some(Err(XlsxError::ParseInt(error))),
                             };
 
                             let column_name = &self.field_names[col_number];
                             row.push(parse_item(
                                 &self.definitions[column_name][value_position],
-                                &self.reader.decoder(),
                             ));
                             break;
                         }
@@ -4249,8 +4185,8 @@ impl<'a, RS: Read + Seek + 'a> Iterator for PivotCacheIter<'a, RS> {
 
                     col_number += 1;
                 }
-                Ok(Event::End(e)) if e.local_name().as_ref() == b"r" => return Some(Ok(row)),
-                Ok(Event::Start(e)) if e.local_name().as_ref() == b"pivotCacheRecords" => {
+                Ok(Event::End(e)) if e.local_name().as_ref() == "r" => return Some(Ok(row)),
+                Ok(Event::Start(e)) if e.local_name().as_ref() == "pivotCacheRecords" => {
                     return Some(Ok(self
                         .field_names
                         .iter()
@@ -4262,7 +4198,7 @@ impl<'a, RS: Read + Seek + 'a> Iterator for PivotCacheIter<'a, RS> {
                 Ok(Event::Start(e)) => {
                     if let Some(tag) = item_tag(&e) {
                         if let Ok(value) = item_value(&e) {
-                            row.push(parse_item(&(tag, value), &self.reader.decoder()));
+                            row.push(parse_item(&(tag, value)));
                             col_number += 1;
                         }
                     }

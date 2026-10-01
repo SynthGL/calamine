@@ -2,7 +2,7 @@
 //
 // Copyright 2016-2025, Johann Tuffe.
 
-use calamine::{Cell, Color, Data, Font, FontWeight, Style};
+use calamine_styles::{Cell, Color, Data, Font, FontWeight, Style};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Example of creating a cell with style
@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Example of creating CellData with style
-    use calamine::CellData;
+    use calamine_styles::CellData;
 
     let cell_data = CellData::with_style(
         Data::Int(42),
@@ -57,8 +57,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_weight(FontWeight::Bold)
                 .with_color(Color::rgb(0, 0, 255)),
         )
-        .with_fill(calamine::Fill::solid(Color::rgb(255, 255, 0)))
-        .with_borders(calamine::Borders::new());
+        .with_fill(calamine_styles::Fill::solid(Color::rgb(255, 255, 0)))
+        .with_borders(calamine_styles::Borders::new());
 
     let styled_cell = Cell::with_style((1, 1), Data::Float(std::f64::consts::PI), complex_style);
 

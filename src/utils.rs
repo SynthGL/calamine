@@ -5,10 +5,81 @@
 //! Internal module providing handy function
 
 use std::borrow::Cow;
+use std::io::{BufRead, Chain, Cursor, Read};
 
 use quick_xml::{escape::resolve_xml_entity, events::BytesRef};
 
 const UNICODE_ESCAPE_LENGTH: usize = 7; // Length of _x00HH_.
+
+/// XML input transcoded to UTF-8 before quick-xml constructs events.
+pub(crate) type XmlReader<R> =
+    quick_xml::Reader<quick_xml::encoding::DecodingReader<Chain<Cursor<Vec<u8>>, R>>>;
+
+/// Select declaration encodings before DecodingReader validates its initial prefix.
+/// Usually the declaration is already buffered, so no input needs copying.
+pub(crate) fn xml_reader<R: BufRead>(mut input: R) -> Result<XmlReader<R>, quick_xml::Error> {
+    let mut prefix = Vec::new();
+    let mut encoding = None;
+    if input.fill_buf()?.len() < 9 {
+        while prefix.len() < 9 {
+            let buffered = input.fill_buf()?;
+            if buffered.is_empty() {
+                break;
+            }
+            let consumed = buffered.len().min(9 - prefix.len());
+            prefix.extend_from_slice(&buffered[..consumed]);
+            input.consume(consumed);
+        }
+    }
+    let buffered = if prefix.is_empty() {
+        input.fill_buf()?
+    } else {
+        prefix.as_slice()
+    };
+    let declaration = buffered.strip_prefix(b"\xef\xbb\xbf").unwrap_or(buffered);
+    if declaration.starts_with(b"<?xml")
+        && declaration.get(5).is_some_and(u8::is_ascii_whitespace)
+    {
+        if let Some(end) = declaration.windows(2).position(|bytes| bytes == b"?>") {
+            encoding = declaration_encoding(&declaration[..end + 2])?;
+        } else {
+            // A declaration may span arbitrary input chunks. Replay only those
+            // chunks we consumed, including its BOM, without buffering the body.
+            loop {
+                let buffered = input.fill_buf()?;
+                if buffered.is_empty() {
+                    break;
+                }
+                let end = buffered.iter().position(|&byte| byte == b'>');
+                let consumed = end.map_or(buffered.len(), |end| end + 1);
+                prefix.extend_from_slice(&buffered[..consumed]);
+                input.consume(consumed);
+                if prefix.ends_with(b"?>") {
+                    encoding = declaration_encoding(
+                        prefix.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&prefix),
+                    )?;
+                    break;
+                }
+            }
+        }
+    }
+    let mut decoding = quick_xml::encoding::DecodingReader::new(Cursor::new(prefix).chain(input));
+    if let Some(encoding) = encoding {
+        decoding.set_encoding(encoding);
+    }
+    Ok(quick_xml::Reader::from_reader(decoding))
+}
+
+fn declaration_encoding(
+    declaration: &[u8],
+) -> Result<Option<&'static encoding_rs::Encoding>, quick_xml::Error> {
+    let declaration = std::str::from_utf8(declaration)
+        .map_err(quick_xml::encoding::EncodingError::from)?;
+    match quick_xml::Reader::from_str(declaration).read_event()? {
+        quick_xml::events::Event::Decl(declaration) => Ok(declaration.encoder()),
+        _ => Ok(None),
+    }
+}
 
 macro_rules! from_err {
     ($from:ty, $to:tt, $var:tt) => {
@@ -86,10 +157,10 @@ pub(crate) fn unescape_entity_to_buffer(
     entity: &BytesRef,
     buffer: &mut String,
 ) -> Result<(), quick_xml::Error> {
-    let decoded = entity.decode()?;
+    let decoded = entity.as_ref();
 
     // Handle standard XML entities directly.
-    if let Some(unescaped_xml_entity) = resolve_xml_entity(&decoded) {
+    if let Some(unescaped_xml_entity) = resolve_xml_entity(decoded) {
         buffer.push_str(unescaped_xml_entity);
         return Ok(());
     }
@@ -1145,6 +1216,46 @@ pub const FTAB_ARGC: [u8; FTAB_LEN] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_legacy_encoding_precedes_prefix_validation() {
+        // The non-UTF-8 byte occurs inside DecodingReader's 64-byte prefix.
+        let xml = b"<?xml version='1.0' encoding='windows-1252'?><t>\xe9</t>";
+        let mut reader = xml_reader(std::io::BufReader::new(xml.as_slice())).unwrap();
+        let mut buffer = Vec::new();
+        let mut text = String::new();
+        loop {
+            buffer.clear();
+            match reader.read_event_into(&mut buffer).unwrap() {
+                quick_xml::events::Event::Text(value) => text.push_str(&value),
+                quick_xml::events::Event::Eof => break,
+                _ => {}
+            }
+        }
+        assert_eq!(text, "é");
+    }
+
+    #[test]
+    fn declared_encoding_survives_fragmented_and_long_declarations() {
+        let mut xml = b"<?xml version='1.0'".to_vec();
+        xml.extend(std::iter::repeat_n(b' ', 8192));
+        xml.extend_from_slice(b"encoding='windows-1252'?><t>\xe9</t>");
+        for capacity in [1, 8, 8192] {
+            let input = std::io::BufReader::with_capacity(capacity, xml.as_slice());
+            let mut reader = xml_reader(input).unwrap();
+            let mut buffer = Vec::new();
+            let mut text = String::new();
+            loop {
+                buffer.clear();
+                match reader.read_event_into(&mut buffer).unwrap() {
+                    quick_xml::events::Event::Text(value) => text.push_str(&value),
+                    quick_xml::events::Event::Eof => break,
+                    _ => {}
+                }
+            }
+            assert_eq!(text, "é", "buffer capacity {capacity}");
+        }
+    }
 
     #[test]
     fn sound_to_u32() {

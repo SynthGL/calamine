@@ -8,13 +8,13 @@
 //!
 //! # Status
 //!
-//! **calamine** is a pure Rust library to read Excel and `OpenDocument` Spreadsheet files.
+//! **calamine-styles** is a pure Rust library to read Excel and `OpenDocument` Spreadsheet files.
 //!
 //! Read both cell values and vba project.
 //!
 //! # Examples
 //! ```
-//! use calamine::{Reader, open_workbook, Xlsx, Data};
+//! use calamine_styles::{Reader, open_workbook, Xlsx, Data};
 //!
 //! // opens a new workbook
 //! # let path = format!("{}/tests/issue3.xlsm", env!("CARGO_MANIFEST_DIR"));
@@ -63,17 +63,17 @@
 //!
 //! # Crate Features
 //!
-//! The following is a list of the optional features supported by the `calamine`
+//! The following is a list of the optional features supported by the `calamine_styles`
 //! crate. They are all off by default.
 //!
 //! - `chrono`: Adds support for Chrono date/time types to the API.
 //! - `dates`: A deprecated backwards compatible synonym for the `chrono` feature.
 //! - `picture`: Adds support for reading raw data for pictures in spreadsheets.
 //!
-//! A `calamine` feature can be enabled in your `Cargo.toml` file as follows:
+//! A `calamine-styles` feature can be enabled in your `Cargo.toml` file as follows:
 //!
 //! ```bash
-//! cargo add calamine -F chrono
+//! cargo add calamine-styles -F chrono
 //! ```
 
 #[macro_use]
@@ -316,7 +316,7 @@ where
     ///
     /// # Examples
     /// ```
-    /// use calamine::{Xlsx, open_workbook, Reader};
+    /// use calamine_styles::{Xlsx, open_workbook, Reader};
     ///
     /// # let path = format!("{}/tests/issue3.xlsm", env!("CARGO_MANIFEST_DIR"));
     /// let mut workbook: Xlsx<_> = open_workbook(path).unwrap();
@@ -357,7 +357,7 @@ where
     /// An example of getting the raw data of pictures in an spreadsheet file.
     ///
     /// ```
-    /// # use calamine::{open_workbook, Error, Reader, Xlsx};
+    /// # use calamine_styles::{open_workbook, Error, Reader, Xlsx};
     /// #
     /// # fn main() -> Result<(), Error> {
     /// #     let path = "tests/picture.xlsx";
@@ -396,7 +396,7 @@ where
 {
     /// Get worksheet range where shared string values are only borrowed.
     ///
-    /// This is implemented only for [`calamine::Xlsx`](crate::Xlsx) and [`calamine::Xlsb`](crate::Xlsb), as Xls and Ods formats
+    /// This is implemented only for [`calamine_styles::Xlsx`](crate::Xlsx) and [`calamine_styles::Xlsb`](crate::Xlsb), as Xls and Ods formats
     /// do not support lazy iteration.
     fn worksheet_range_ref<'a>(&'a mut self, name: &str)
         -> Result<Range<DataRef<'a>>, Self::Error>;
@@ -404,7 +404,7 @@ where
     /// Get the nth worksheet range where shared string values are only borrowed. Shortcut for getting the nth
     /// worksheet name, then the corresponding worksheet.
     ///
-    /// This is implemented only for [`calamine::Xlsx`](crate::Xlsx) and [`calamine::Xlsb`](crate::Xlsb), as Xls and Ods formats
+    /// This is implemented only for [`calamine_styles::Xlsx`](crate::Xlsx) and [`calamine_styles::Xlsb`](crate::Xlsb), as Xls and Ods formats
     /// do not support lazy iteration.
     fn worksheet_range_at_ref(
         &mut self,
@@ -458,7 +458,7 @@ impl CellType for Style {}
 /// An example of creating a range of `Cell`s and iterating over them.
 ///
 /// ```
-/// use calamine::{Cell, Data, Range};
+/// use calamine_styles::{Cell, Data, Range};
 ///
 /// let cells = vec![
 ///     Cell::new((1, 1), Data::Int(1)),
@@ -514,7 +514,7 @@ impl<T: CellType> Cell<T> {
     /// An example of creating a new `Cell` instance.
     ///
     /// ```
-    /// use calamine::{Cell, Data};
+    /// use calamine_styles::{Cell, Data};
     ///
     /// let cell = Cell::new((1, 2), Data::Int(42));
     ///
@@ -544,7 +544,7 @@ impl<T: CellType> Cell<T> {
     /// An example of creating a new `Cell` instance with style.
     ///
     /// ```
-    /// use calamine::{Cell, Data, Style, Font, FontWeight};
+    /// use calamine_styles::{Cell, Data, Style, Font, FontWeight};
     ///
     /// let style = Style::new().with_font(Font::new().with_weight(FontWeight::Bold));
     /// let cell = Cell::with_style((1, 2), Data::Int(42), style);
@@ -568,7 +568,7 @@ impl<T: CellType> Cell<T> {
     /// An example of getting a `Cell` position `(row, column)`.
     ///
     /// ```
-    /// use calamine::{Cell, Data};
+    /// use calamine_styles::{Cell, Data};
     ///
     /// let cell = Cell::new((1, 2), Data::Int(42));
     ///
@@ -586,7 +586,7 @@ impl<T: CellType> Cell<T> {
     /// An example of getting a `Cell` value.
     ///
     /// ```
-    /// use calamine::{Cell, Data};
+    /// use calamine_styles::{Cell, Data};
     ///
     /// let cell = Cell::new((1, 2), Data::Int(42));
     ///
@@ -604,7 +604,7 @@ impl<T: CellType> Cell<T> {
     /// An example of getting a `Cell` style.
     ///
     /// ```
-    /// use calamine::{Cell, Data, Style, Font, FontWeight};
+    /// use calamine_styles::{Cell, Data, Style, Font, FontWeight};
     ///
     /// let style = Style::new().with_font(Font::new().with_weight(FontWeight::Bold));
     /// let cell = Cell::with_style((1, 2), Data::Int(42), style);
@@ -623,7 +623,7 @@ impl<T: CellType> Cell<T> {
     /// An example of checking if a `Cell` has style.
     ///
     /// ```
-    /// use calamine::{Cell, Data, Style, Font, FontWeight};
+    /// use calamine_styles::{Cell, Data, Style, Font, FontWeight};
     ///
     /// let cell = Cell::new((1, 2), Data::Int(42));
     /// assert!(!cell.has_style());
@@ -644,7 +644,7 @@ impl<T: CellType> Cell<T> {
 
 /// A struct which represents an area of cells and the data within it.
 ///
-/// Ranges are used by `calamine` to represent an area of data in a worksheet. A
+/// Ranges are used by `calamine_styles` to represent an area of data in a worksheet. A
 /// `Range` is a rectangular area of cells defined by its start and end
 /// positions.
 ///
@@ -713,10 +713,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of creating a new calamine `Range`.
+    /// An example of creating a new calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Data, Range};
+    /// use calamine_styles::{Data, Range};
     ///
     /// // Create a 8x1 Range.
     /// let range: Range<Data> = Range::new((2, 2), (9, 2));
@@ -746,10 +746,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of creating a new empty calamine `Range`.
+    /// An example of creating a new empty calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Data, Range};
+    /// use calamine_styles::{Data, Range};
     ///
     /// let range: Range<Data> = Range::empty();
     ///
@@ -774,10 +774,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of getting the start position of a calamine `Range`.
+    /// An example of getting the start position of a calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Data, Range};
+    /// use calamine_styles::{Data, Range};
     ///
     /// let range: Range<Data> = Range::new((2, 3), (9, 3));
     ///
@@ -802,10 +802,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of getting the end position of a calamine `Range`.
+    /// An example of getting the end position of a calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Data, Range};
+    /// use calamine_styles::{Data, Range};
     ///
     /// let range: Range<Data> = Range::new((2, 3), (9, 3));
     ///
@@ -828,10 +828,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of getting the column width of a calamine `Range`.
+    /// An example of getting the column width of a calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Data, Range};
+    /// use calamine_styles::{Data, Range};
     ///
     /// let range: Range<Data> = Range::new((2, 3), (9, 3));
     ///
@@ -854,10 +854,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of getting the row height of a calamine `Range`.
+    /// An example of getting the row height of a calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Data, Range};
+    /// use calamine_styles::{Data, Range};
     ///
     /// let range: Range<Data> = Range::new((2, 3), (9, 3));
     ///
@@ -877,10 +877,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of getting the (height, width) size of a calamine `Range`.
+    /// An example of getting the (height, width) size of a calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Data, Range};
+    /// use calamine_styles::{Data, Range};
     ///
     /// let range: Range<Data> = Range::new((2, 3), (9, 3));
     ///
@@ -896,10 +896,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of checking if a calamine `Range` is empty.
+    /// An example of checking if a calamine_styles `Range` is empty.
     ///
     /// ```
-    /// use calamine::{Data, Range};
+    /// use calamine_styles::{Data, Range};
     ///
     /// let range: Range<Data> = Range::empty();
     ///
@@ -923,11 +923,11 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of creating a new calamine `Range` for a sparse vector of
+    /// An example of creating a new calamine_styles `Range` for a sparse vector of
     /// Cells.
     ///
     /// ```
-    /// use calamine::{Cell, Data, Range};
+    /// use calamine_styles::{Cell, Data, Range};
     ///
     /// let cells = vec![
     ///     Cell::new((2, 2), Data::Int(1)),
@@ -1000,10 +1000,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of setting a value in a calamine `Range`.
+    /// An example of setting a value in a calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Data, Range};
+    /// use calamine_styles::{Data, Range};
     ///
     /// let mut range = Range::new((0, 0), (5, 2));
     ///
@@ -1082,10 +1082,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of getting a value in a calamine `Range`.
+    /// An example of getting a value in a calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Data, Range};
+    /// use calamine_styles::{Data, Range};
     ///
     /// let range = Range::new((1, 1), (5, 5));
     ///
@@ -1122,11 +1122,11 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of getting a value in a calamine `Range`, using relative
+    /// An example of getting a value in a calamine_styles `Range`, using relative
     /// positioning.
     ///
     /// ```
-    /// use calamine::{Data, Range};
+    /// use calamine_styles::{Data, Range};
     ///
     /// let mut range = Range::new((1, 1), (5, 5));
     ///
@@ -1151,10 +1151,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of using a `Row` iterator with a calamine `Range`.
+    /// An example of using a `Row` iterator with a calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Cell, Data, Range};
+    /// use calamine_styles::{Cell, Data, Range};
     ///
     /// let cells = vec![
     ///     Cell::new((1, 1), Data::Int(1)),
@@ -1206,10 +1206,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of iterating over the used cells in a calamine `Range`.
+    /// An example of iterating over the used cells in a calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Cell, Data, Range};
+    /// use calamine_styles::{Cell, Data, Range};
     ///
     /// let cells = vec![
     ///     Cell::new((1, 1), Data::Int(1)),
@@ -1250,10 +1250,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of iterating over the used cells in a calamine `Range`.
+    /// An example of iterating over the used cells in a calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Cell, Data, Range};
+    /// use calamine_styles::{Cell, Data, Range};
     ///
     /// let cells = vec![
     ///     Cell::new((1, 1), Data::Int(1)),
@@ -1299,7 +1299,7 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of creating a deserializer fora calamine `Range`.
+    /// An example of creating a deserializer for a calamine_styles `Range`.
     ///
     /// The sample Excel file `temperature.xlsx` contains a single sheet named
     /// "Sheet1" with the following data:
@@ -1321,7 +1321,7 @@ impl<T: CellType> Range<T> {
     /// ```
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Reader, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Reader, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = "tests/temperature.xlsx";
@@ -1367,10 +1367,10 @@ impl<T: CellType> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of getting a sub range of a calamine `Range`.
+    /// An example of getting a sub range of a calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Data, Range};
+    /// use calamine_styles::{Data, Range};
     ///
     /// // Create a range with some values.
     /// let mut a = Range::new((1, 1), (3, 3));
@@ -1457,10 +1457,10 @@ impl<T: CellType + fmt::Display> Range<T> {
     ///
     /// # Examples
     ///
-    /// An example of getting the header row of a calamine `Range`.
+    /// An example of getting the header row of a calamine_styles `Range`.
     ///
     /// ```
-    /// use calamine::{Data, Range};
+    /// use calamine_styles::{Data, Range};
     ///
     /// // Create a range with some values.
     /// let mut range = Range::new((0, 0), (5, 2));
@@ -1492,10 +1492,10 @@ impl<T: CellType + fmt::Display> Range<T> {
 ///
 /// # Examples
 ///
-/// An example of row indexing for a calamine `Range`.
+/// An example of row indexing for a calamine_styles `Range`.
 ///
 /// ```
-/// use calamine::{Data, Range};
+/// use calamine_styles::{Data, Range};
 ///
 /// // Create a range with a value.
 /// let mut range = Range::new((1, 1), (3, 3));
@@ -1517,10 +1517,10 @@ impl<T: CellType> Index<usize> for Range<T> {
 ///
 /// # Examples
 ///
-/// An example of cell indexing for a calamine `Range`.
+/// An example of cell indexing for a calamine_styles `Range`.
 ///
 /// ```
-/// use calamine::{Data, Range};
+/// use calamine_styles::{Data, Range};
 ///
 /// // Create a range with a value.
 /// let mut range = Range::new((1, 1), (3, 3));
@@ -1551,10 +1551,10 @@ impl<T: CellType> IndexMut<usize> for Range<T> {
 ///
 /// # Examples
 ///
-/// An example of mutable cell indexing for a calamine `Range`.
+/// An example of mutable cell indexing for a calamine_styles `Range`.
 ///
 /// ```
-/// use calamine::{Data, Range};
+/// use calamine_styles::{Data, Range};
 ///
 /// // Create a new empty range.
 /// let mut range = Range::new((1, 1), (3, 3));
@@ -1582,11 +1582,11 @@ impl<T: CellType> IndexMut<(usize, usize)> for Range<T> {
 ///
 /// # Examples
 ///
-/// An example iterating over the cells in a calamine range using the `Cells`
+/// An example iterating over the cells in a calamine_styles range using the `Cells`
 /// iterator returned by [`Range::cells()`].
 ///
 /// ```
-/// use calamine::{Cell, Data, Range};
+/// use calamine_styles::{Cell, Data, Range};
 ///
 /// let cells = vec![
 ///     Cell::new((1, 1), Data::Int(1)),
@@ -1651,11 +1651,11 @@ impl<'a, T: 'a + CellType> ExactSizeIterator for Cells<'a, T> {}
 ///
 /// # Examples
 ///
-/// An example iterating over the used cells in a calamine range using the
+/// An example iterating over the used cells in a calamine_styles range using the
 /// `UsedCells` iterator returned by [`Range::used_cells()`].
 ///
 /// ```
-/// use calamine::{Cell, Data, Range};
+/// use calamine_styles::{Cell, Data, Range};
 ///
 /// let cells = vec![
 ///     Cell::new((1, 1), Data::Int(1)),
@@ -1722,11 +1722,11 @@ impl<'a, T: 'a + CellType> DoubleEndedIterator for UsedCells<'a, T> {
 ///
 /// # Examples
 ///
-/// An example iterating over the rows in a calamine range using the `Rows`
+/// An example iterating over the rows in a calamine_styles range using the `Rows`
 /// iterator returned by [`Range::rows()`].
 ///
 /// ```
-/// use calamine::{Cell, Data, Range};
+/// use calamine_styles::{Cell, Data, Range};
 ///
 /// let cells = vec![
 ///     Cell::new((1, 1), Data::Int(1)),
@@ -1792,10 +1792,10 @@ impl<'a, T: 'a + CellType> ExactSizeIterator for Rows<'a, T> {}
 ///
 /// Tables in Excel are a way of grouping a range of cells into a single entity
 /// that has common formatting or that can be referenced in formulas. In
-/// `calamine`, tables can be read and converted to a data [`Range`] for further
+/// `calamine_styles`, tables can be read and converted to a data [`Range`] for further
 /// processing.
 ///
-/// Calamine does not automatically load Table data from a workbook to avoid
+/// Calamine-styles does not automatically load Table data from a workbook to avoid
 /// unnecessary overhead. Instead you must explicitly load the Table data using
 /// the [`Xlsx::load_tables()`](crate::Xlsx::load_tables) method. Once the
 /// tables have been loaded the following methods can be used to extract and
@@ -1816,7 +1816,7 @@ impl<'a, T: 'a + CellType> ExactSizeIterator for Rows<'a, T> {}
 /// # Examples
 ///
 /// An example of reading the data from an Excel worksheet Table using the
-/// `calamine` crate.
+/// `calamine_styles` crate.
 ///
 /// The sample Excel file `inventory-table.xlsx` contains a single sheet named
 /// "Sheet1" with the following data laid out in a worksheet Table called
@@ -1843,7 +1843,7 @@ impl<'a, T: 'a + CellType> ExactSizeIterator for Rows<'a, T> {}
 /// ```
 ///
 /// ```
-/// use calamine::{open_workbook, Error, Xlsx};
+/// use calamine_styles::{open_workbook, Error, Xlsx};
 ///
 /// fn main() -> Result<(), Error> {
 ///     let path = format!("{}/tests/inventory-table.xlsx", env!("CARGO_MANIFEST_DIR"));
@@ -1923,7 +1923,7 @@ impl<T> Table<T> {
     /// An example of getting the name of an Excel worksheet Table.
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = format!("{}/tests/inventory-table.xlsx", env!("CARGO_MANIFEST_DIR"));
@@ -1959,7 +1959,7 @@ impl<T> Table<T> {
     /// Table.
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = format!("{}/tests/inventory-table.xlsx", env!("CARGO_MANIFEST_DIR"));
@@ -1998,7 +1998,7 @@ impl<T> Table<T> {
     /// An example of getting the column headers for an Excel worksheet Table.
     ///
     /// ```
-    /// use calamine::{open_workbook, Error, Xlsx};
+    /// use calamine_styles::{open_workbook, Error, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = format!("{}/tests/inventory-table.xlsx", env!("CARGO_MANIFEST_DIR"));
@@ -2035,7 +2035,7 @@ impl<T> Table<T> {
     /// An example of getting the data range of an Excel worksheet Table.
     ///
     /// ```
-    /// use calamine::{open_workbook, Data, Error, Xlsx};
+    /// use calamine_styles::{open_workbook, Data, Error, Xlsx};
     ///
     /// fn main() -> Result<(), Error> {
     ///     let path = format!("{}/tests/inventory-table.xlsx", env!("CARGO_MANIFEST_DIR"));
@@ -2076,7 +2076,7 @@ impl<T> Table<T> {
 /// `From/Into` trait.
 ///
 /// ```
-/// use calamine::{open_workbook, Data, Error, Range, Xlsx};
+/// use calamine_styles::{open_workbook, Data, Error, Range, Xlsx};
 ///
 /// fn main() -> Result<(), Error> {
 ///     let path = format!("{}/tests/inventory-table.xlsx", env!("CARGO_MANIFEST_DIR"));

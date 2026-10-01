@@ -2,11 +2,11 @@
 //
 // Copyright 2016-2025, Johann Tuffe.
 
-//! An example for using the `calamine` crate to to search a directory for Excel
+//! An example for using the `calamine_styles` crate to to search a directory for Excel
 //! files and check them for errors.
 //!
 //! Recursively searches for XLSX, XLSM, XLSB, and XLS Excel files and parses
-//! them to check for any `calamine` errors. Also checks for and counts the
+//! them to check for any `calamine_styles` errors. Also checks for and counts the
 //! number of missing VBA references or the number of cells with Excel errors.
 //!
 
@@ -16,7 +16,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
-use calamine::{open_workbook_auto, Data, Error, Reader};
+use calamine_styles::{open_workbook_auto, Data, Error, Reader};
 
 #[derive(Debug)]
 #[allow(dead_code)]

@@ -2,18 +2,18 @@
 //
 // Copyright 2016-2025, Johann Tuffe.
 
-use calamine::vba::Reference;
-use calamine::Data::{Bool, DateTime, DateTimeIso, DurationIso, Empty, Error, Float, Int, String};
-use calamine::{
+use calamine_styles::vba::Reference;
+use calamine_styles::Data::{Bool, DateTime, DateTimeIso, DurationIso, Empty, Error, Float, Int, String};
+use calamine_styles::{
     open_workbook, open_workbook_auto, BorderStyle, Color, DataRef, DataType, Dimensions,
     ExcelDateTime, ExcelDateTimeType, HeaderRow, HorizontalAlignment, Ods, Range, Reader,
     ReaderRef, Sheet, SheetType, SheetVisible, UnderlineStyle, VerticalAlignment, Xls, Xlsb, Xlsx,
 };
-use calamine::{CellErrorType::*, Data};
+use calamine_styles::{CellErrorType::*, Data};
 use rstest::rstest;
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{BufReader, Cursor};
+use std::io::{BufReader, Cursor, Write};
 use std::sync::Once;
 
 static INIT: Once = Once::new();
@@ -1169,7 +1169,7 @@ fn issue_221() {
 
 #[test]
 fn merged_regions_xlsx() {
-    use calamine::Dimensions;
+    use calamine_styles::Dimensions;
     use std::string::String;
     let mut excel: Xlsx<_> = wb("merged_range.xlsx");
     excel.load_merged_regions().unwrap();
@@ -1434,7 +1434,7 @@ fn test_values_xls() {
 }
 
 #[test]
-fn issue_271() -> Result<(), calamine::Error> {
+fn issue_271() -> Result<(), calamine_styles::Error> {
     let mut count = 0;
     let mut values = Vec::new();
     loop {
@@ -1499,7 +1499,7 @@ fn digest(data: &[u8]) -> [u8; 32] {
 // cargo test --features picture
 #[test]
 #[cfg(feature = "picture")]
-fn pictures() -> Result<(), calamine::Error> {
+fn pictures() -> Result<(), calamine_styles::Error> {
     let jpg_path = test_path("picture.jpg");
     let png_path = test_path("picture.png");
 
@@ -1847,7 +1847,7 @@ fn issue_102() {
     assert!(
         matches!(
             open_workbook::<Xlsx<_>, _>(path),
-            Err(calamine::XlsxError::Password)
+            Err(calamine_styles::XlsxError::Password)
         ),
         "Is expected to return XlsxError::Password error"
     );
@@ -1874,7 +1874,7 @@ fn issue_385() {
     assert!(
         matches!(
             open_workbook::<Xls<_>, _>(path),
-            Err(calamine::XlsError::Password)
+            Err(calamine_styles::XlsError::Password)
         ),
         "Is expected to return XlsError::Password error"
     );
@@ -1886,7 +1886,7 @@ fn pass_protected_xlsb() {
     assert!(
         matches!(
             open_workbook::<Xlsb<_>, _>(path),
-            Err(calamine::XlsbError::Password)
+            Err(calamine_styles::XlsbError::Password)
         ),
         "Is expected to return XlsbError::Password error"
     );
@@ -1898,7 +1898,7 @@ fn pass_protected_ods() {
     assert!(
         matches!(
             open_workbook::<Ods<_>, _>(path),
-            Err(calamine::OdsError::Password)
+            Err(calamine_styles::OdsError::Password)
         ),
         "Is expected to return OdsError::Password error"
     );
@@ -2498,7 +2498,7 @@ fn test_oom_allocation() {
     assert!(
         matches!(
             open_workbook::<Xls<_>, _>(path),
-            Err(calamine::XlsError::Cfb(_))
+            Err(calamine_styles::XlsError::Cfb(_))
         ),
         "Is expected to return XlsError::Cfb error"
     );
@@ -2698,7 +2698,7 @@ fn test_underline_parsing() {
 
 #[test]
 fn test_color_parsing() {
-    use calamine::Color;
+    use calamine_styles::Color;
 
     // Test that our color parsing works for both RGB and ARGB formats
     let red_rgb = Color::rgb(255, 0, 0);
@@ -2812,7 +2812,7 @@ fn test_problematic_formats() {
 
 #[test]
 fn test_indexed_colors() {
-    use calamine::Color;
+    use calamine_styles::Color;
 
     // Test some key indexed colors from the official Excel palette
     // Based on: https://learn.microsoft.com/en-us/office/vba/api/excel.colorindex
@@ -3214,11 +3214,11 @@ fn unsupported_style_and_layout_readers_validate_sheet_names() {
         .has_custom_dimensions());
     assert!(matches!(
         xls.worksheet_style(MISSING),
-        Err(calamine::XlsError::WorksheetNotFound(name)) if name == MISSING
+        Err(calamine_styles::XlsError::WorksheetNotFound(name)) if name == MISSING
     ));
     assert!(matches!(
         xls.worksheet_layout(MISSING),
-        Err(calamine::XlsError::WorksheetNotFound(name)) if name == MISSING
+        Err(calamine_styles::XlsError::WorksheetNotFound(name)) if name == MISSING
     ));
 
     let mut xlsb: Xlsb<_> = wb("issues.xlsb");
@@ -3230,11 +3230,11 @@ fn unsupported_style_and_layout_readers_validate_sheet_names() {
         .has_custom_dimensions());
     assert!(matches!(
         xlsb.worksheet_style(MISSING),
-        Err(calamine::XlsbError::WorksheetNotFound(name)) if name == MISSING
+        Err(calamine_styles::XlsbError::WorksheetNotFound(name)) if name == MISSING
     ));
     assert!(matches!(
         xlsb.worksheet_layout(MISSING),
-        Err(calamine::XlsbError::WorksheetNotFound(name)) if name == MISSING
+        Err(calamine_styles::XlsbError::WorksheetNotFound(name)) if name == MISSING
     ));
 
     let mut ods: Ods<_> = wb("issues.ods");
@@ -3246,10 +3246,163 @@ fn unsupported_style_and_layout_readers_validate_sheet_names() {
         .has_custom_dimensions());
     assert!(matches!(
         ods.worksheet_style(MISSING),
-        Err(calamine::OdsError::WorksheetNotFound(name)) if name == MISSING
+        Err(calamine_styles::OdsError::WorksheetNotFound(name)) if name == MISSING
     ));
     assert!(matches!(
         ods.worksheet_layout(MISSING),
-        Err(calamine::OdsError::WorksheetNotFound(name)) if name == MISSING
+        Err(calamine_styles::OdsError::WorksheetNotFound(name)) if name == MISSING
     ));
+}
+
+fn encoded_xml(body: &str, encoding: &str, long_declaration: bool) -> Vec<u8> {
+    // The long declaration crosses DecodingReader's 64-byte initial prefix.
+    let padding = if long_declaration { " ".repeat(80) } else { std::string::String::new() };
+    let xml = format!(r#"<?xml version="1.0"{padding} encoding="{encoding}"?>{body}"#);
+    match encoding {
+        "UTF-8" => xml.into_bytes(),
+        "UTF-16LE" | "UTF-16BE" => {
+            let little_endian = encoding == "UTF-16LE";
+            let mut bytes = if little_endian { vec![0xff, 0xfe] } else { vec![0xfe, 0xff] };
+            for unit in xml.encode_utf16() {
+                bytes.extend_from_slice(&if little_endian {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            bytes
+        }
+        "windows-1252" => {
+            let (bytes, _, unmappable) = encoding_rs::WINDOWS_1252.encode(&xml);
+            assert!(!unmappable, "XML fixture must be representable in windows-1252");
+            bytes.into_owned()
+        }
+        _ => panic!("unsupported test encoding: {encoding}"),
+    }
+}
+
+fn xml_workbook_zip(parts: &[(&str, Vec<u8>)]) -> Cursor<Vec<u8>> {
+    let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored);
+    for (name, bytes) in parts {
+        archive.start_file(*name, options).unwrap();
+        archive.write_all(bytes).unwrap();
+    }
+    let mut cursor = archive.finish().unwrap();
+    cursor.set_position(0);
+    cursor
+}
+
+#[rstest]
+#[case("UTF-8", false)]
+#[case("UTF-16LE", false)]
+#[case("UTF-16BE", false)]
+#[case("windows-1252", false)]
+#[case("UTF-16LE", true)]
+#[case("UTF-16BE", true)]
+#[case("windows-1252", true)]
+fn xlsx_xml_encodings_preserve_cells_formulas_and_styles(
+    #[case] encoding: &str,
+    #[case] long_declaration: bool,
+) {
+    let parts = [
+        (
+            "xl/_rels/workbook.xml.rels",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/été.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/workbook.xml",
+            r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="été&amp;co" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="nomé&amp;co">'été&amp;co'!<![CDATA[$A$1]]>&#58;$D$1</definedName></definedNames></workbook>"#,
+        ),
+        (
+            "xl/sharedStrings.xml",
+            // In the short windows-1252 case, é occurs within the first 64 bytes,
+            // before the XML declaration can be returned by a decoding reader.
+            r#"<sst><si><t>é&amp;x&#33;<![CDATA[<c>]]>€fin_x00&#52;1_</t></si></sst>"#,
+        ),
+        (
+            "xl/styles.xml",
+            r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="0.00"/></numFmts><fonts count="2"><font><name val="Café"/><b/><color rgb="FF123456"/></font><font><name>É&amp;&#33;<![CDATA[<font>]]>fin</name></font></fonts><cellXfs count="2"><xf fontId="0" numFmtId="0"/><xf fontId="1" numFmtId="164"/></cellXfs></styleSheet>"#,
+        ),
+        (
+            "xl/worksheets/été.xml",
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D1"/><sheetData><row r="1"><c r="A1" t="s" s="0"><v>0</v></c><c r="B1" t="inlineStr" s="1"><is><t>début&amp;&#x21;<![CDATA[<inline>]]>fin_x00&#52;1_</t></is></c><c r="C1" t="str" s="1"><f>IF(A1&lt;2,&quot;café&quot;,<![CDATA["fin")]]></f><v>ré&amp;&#33;<![CDATA[<v>]]>fin</v></c><c r="D1" s="1"><v>42.5</v></c></row></sheetData></worksheet>"#,
+        ),
+    ]
+    .map(|(name, body)| (name, encoded_xml(body, encoding, long_declaration)));
+    let mut workbook = Xlsx::new(xml_workbook_zip(&parts)).unwrap();
+    assert_eq!(workbook.sheet_names(), vec!["été&co"]);
+    assert_eq!(
+        workbook.defined_names(),
+        &[("nomé&co".to_owned(), "'été&co'!$A$1:$D$1".to_owned())]
+    );
+
+    let values = workbook.worksheet_range("été&co").unwrap();
+    assert!(text_eq(values.get_value((0, 0)).unwrap(), "é&x!<c>€finA"));
+    assert!(text_eq(values.get_value((0, 1)).unwrap(), "début&!<inline>finA"));
+    assert_eq!(values.get_value((0, 2)), Some(&String("ré&!<v>fin".to_owned())));
+    assert_eq!(values.get_value((0, 3)), Some(&Float(42.5)));
+    let formulas = workbook.worksheet_formula("été&co").unwrap();
+    assert_eq!(
+        formulas.get_value((0, 2)).map(|formula| formula.as_str()),
+        Some(r#"IF(A1<2,"café","fin")"#)
+    );
+
+    let styles = workbook.worksheet_style("été&co").unwrap();
+    let font = styles.get((0, 0)).unwrap().get_font().unwrap();
+    assert_eq!(font.name.as_deref(), Some("Café"));
+    assert!(font.is_bold());
+    assert_eq!(font.color, Some(Color::rgb(0x12, 0x34, 0x56)));
+    let inline_style = styles.get((0, 1)).unwrap();
+    assert_eq!(
+        inline_style.get_font().unwrap().name.as_deref(),
+        Some("É&!<font>fin")
+    );
+    assert_eq!(
+        styles.get((0, 3)).unwrap().get_number_format().unwrap().format_code,
+        "0.00"
+    );
+}
+
+#[rstest]
+#[case("UTF-8", false)]
+#[case("UTF-16LE", false)]
+#[case("UTF-16BE", false)]
+#[case("windows-1252", false)]
+#[case("UTF-16LE", true)]
+#[case("UTF-16BE", true)]
+#[case("windows-1252", true)]
+fn ods_xml_encodings_preserve_text_attributes_formulas_and_visibility(
+    #[case] encoding: &str,
+    #[case] long_declaration: bool,
+) {
+    // The early comment forces decoding of nonASCII bytes inside the short
+    // declaration prefix even though password detection ignores this comment.
+    let manifest = r#"<!--é--><manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"/>"#;
+    let content = r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"><office:automatic-styles><style:style style:name="caché" style:family="table"><style:table-properties table:display="false"/></style:style></office:automatic-styles><office:body><office:spreadsheet><table:table table:name="été&amp;co" table:style-name="caché"><table:table-row><table:table-cell office:value-type="string"><text:p>é&amp;<text:span>x&#33;<![CDATA[<c>]]>€fin</text:span><office:annotation><text:p>ignored&amp;<![CDATA[annotation]]></text:p></office:annotation><text:s text:c="2"/>fin</text:p><text:p>suite</text:p></table:table-cell><table:table-cell office:value-type="string" office:string-value="café&amp;co"/><table:table-cell office:value-type="float" office:value="42.5" table:formula="of:=IF([.A1]&lt;2;&quot;café&quot;;&quot;fin&quot;)"/></table:table-row></table:table><table:named-expressions><table:named-expression table:name="nomé&amp;co" table:expression="of:=&quot;café&amp;co&quot;"/></table:named-expressions></office:spreadsheet></office:body></office:document-content>"#;
+    let parts = [
+        ("mimetype", b"application/vnd.oasis.opendocument.spreadsheet".to_vec()),
+        ("META-INF/manifest.xml", encoded_xml(manifest, encoding, long_declaration)),
+        ("content.xml", encoded_xml(content, encoding, long_declaration)),
+    ];
+    let mut workbook = Ods::new(xml_workbook_zip(&parts)).unwrap();
+    assert_eq!(workbook.sheet_names(), vec!["été&co"]);
+    assert_eq!(workbook.sheets_metadata()[0].visible, SheetVisible::Hidden);
+    assert_eq!(
+        workbook.defined_names(),
+        &[("nomé&co".to_owned(), r#"of:="café&co""#.to_owned())]
+    );
+    let values = workbook.worksheet_range("été&co").unwrap();
+    assert_eq!(
+        values.get_value((0, 0)),
+        Some(&String("é&x!<c>€fin  fin\nsuite".to_owned()))
+    );
+    assert_eq!(values.get_value((0, 1)), Some(&String("café&co".to_owned())));
+    assert_eq!(values.get_value((0, 2)), Some(&Float(42.5)));
+    let formulas = workbook.worksheet_formula("été&co").unwrap();
+    assert_eq!(
+        formulas.get_value((0, 2)).map(|formula| formula.as_str()),
+        Some(r#"of:=IF([.A1]<2;"café";"fin")"#)
+    );
 }

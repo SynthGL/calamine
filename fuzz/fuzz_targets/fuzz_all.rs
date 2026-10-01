@@ -4,7 +4,7 @@
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use calamine::{Xlsx, open_workbook, Reader};
+use calamine_styles::{Xlsx, open_workbook, Reader};
 use std::io::Write;
 use std::fs::File;
 

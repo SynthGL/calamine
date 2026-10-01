@@ -6,8 +6,9 @@ formats.
 
 ## Relationship to calamine
 
-The package is published as `calamine-styles`, while its Rust library keeps the
-`calamine` crate name so existing source imports remain compatible. The current
+The package is published as `calamine-styles`, with the Rust crate name
+`calamine_styles`. Import the fork directly under that name; it does not retain
+the upstream `calamine` crate name as an alias. The current
 fork baseline is calamine 0.33; promotion is gated on rebasing the style delta
 onto the current upstream release and passing the full test matrix.
 
@@ -25,11 +26,11 @@ range API:
 
 ```toml
 [dependencies]
-calamine = { package = "calamine-styles", version = "0.1", features = ["dates"] }
+calamine-styles = { version = "0.1", features = ["dates"] }
 ```
 
 ```rust
-use calamine::{open_workbook, Reader, Xlsx};
+use calamine_styles::{open_workbook, Reader, Xlsx};
 
 let mut excel: Xlsx<_> = open_workbook("file.xlsx").unwrap();
 let values = excel.worksheet_range("Sheet1").unwrap();
@@ -59,3 +60,6 @@ beta, and nightly test lanes plus formatting, Clippy, and package validation.
 ## License
 
 MIT, matching upstream calamine.
+
+[`Reader::worksheet_style()`]: https://docs.rs/calamine-styles/latest/calamine_styles/trait.Reader.html#method.worksheet_style
+[`StyleRange`]: https://docs.rs/calamine-styles/latest/calamine_styles/struct.StyleRange.html

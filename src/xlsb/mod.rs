@@ -16,13 +16,12 @@ use encoding_rs::UTF_16LE;
 use quick_xml::events::attributes::Attribute;
 use quick_xml::events::Event;
 use quick_xml::name::QName;
-use quick_xml::Reader as XmlReader;
 use zip::read::{ZipArchive, ZipFile};
 use zip::result::ZipError;
 
 use crate::datatype::DataRef;
 use crate::formats::{builtin_format_by_code, detect_custom_number_format, CellFormat};
-use crate::utils::{push_column, read_f64, read_i32, read_u16, read_u32, read_usize};
+use crate::utils::{push_column, read_f64, read_i32, read_u16, read_u32, read_usize, xml_reader};
 use crate::vba::VbaProject;
 use crate::{
     Cell, Data, HeaderRow, Metadata, Range, Reader, ReaderRef, Sheet, SheetType, SheetVisible,
@@ -169,7 +168,7 @@ impl<RS: Read + Seek> Xlsb<RS> {
         let mut relationships = BTreeMap::new();
         match self.zip.by_name("xl/_rels/workbook.bin.rels") {
             Ok(f) => {
-                let mut xml = XmlReader::from_reader(BufReader::new(f));
+                let mut xml = xml_reader(BufReader::new(f))?;
                 let config = xml.config_mut();
                 config.check_end_names = false;
                 config.trim_text(false);
@@ -179,27 +178,22 @@ impl<RS: Read + Seek> Xlsb<RS> {
 
                 loop {
                     match xml.read_event_into(&mut buf) {
-                        Ok(Event::Start(e)) if e.name() == QName(b"Relationship") => {
+                        Ok(Event::Start(e)) if e.name() == QName("Relationship") => {
                             let mut id = None;
                             let mut target = None;
                             for a in e.attributes() {
                                 match a? {
                                     Attribute {
-                                        key: QName(b"Id"),
+                                        key: QName("Id"),
                                         value: v,
                                     } => {
-                                        id = Some(v.to_vec());
+                                        id = Some(v.as_bytes().to_vec());
                                     }
                                     Attribute {
-                                        key: QName(b"Target"),
+                                        key: QName("Target"),
                                         value: v,
                                     } => {
-                                        target = Some(
-                                            xml.decoder()
-                                                .decode(&v)
-                                                .map_err(XlsbError::Encoding)?
-                                                .into_owned(),
-                                        );
+                                        target = Some(v.into_owned());
                                     }
                                     _ => (),
                                 }

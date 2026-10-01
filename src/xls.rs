@@ -143,7 +143,7 @@ pub struct XlsOptions {
     ///
     /// XLS files can contain [code page] identifiers. If this identifier is missing or incorrect,
     /// strings in the parsed spreadsheet may be decoded incorrectly. Setting this field causes
-    /// `calamine::Xls` to interpret strings using the specified code page, which may allow such
+    /// `calamine_styles::Xls` to interpret strings using the specified code page, which may allow such
     /// spreadsheets to be decoded properly.
     ///
     /// [code page]: https://docs.microsoft.com/en-us/windows/win32/intl/code-page-identifiers
@@ -182,11 +182,11 @@ impl<RS: Read + Seek> Xls<RS> {
     /// Creates a new instance using `Options` to inform parsing.
     ///
     /// ```
-    /// use calamine::{Xls,XlsOptions};
+    /// use calamine_styles::{Xls,XlsOptions};
     /// # use std::io::Cursor;
     /// # const BYTES: &[u8] = b"";
     ///
-    /// # fn run() -> Result<Xls<Cursor<&'static [u8]>>, calamine::XlsError> {
+    /// # fn run() -> Result<Xls<Cursor<&'static [u8]>>, calamine_styles::XlsError> {
     /// # let reader = std::io::Cursor::new(BYTES);
     /// let mut options = XlsOptions::default();
     /// // ...set options...

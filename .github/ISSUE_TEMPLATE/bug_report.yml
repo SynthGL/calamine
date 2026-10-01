@@ -1,6 +1,6 @@
 name: 🐞 Bug
 
-description: File a bug/issue in calamine
+description: File a bug/issue in calamine-styles
 
 title: "Bug: add a description here"
 
@@ -32,7 +32,7 @@ body:
     description: Please add a small, complete, sample program that demonstrates your issue.
     value: |
         ```
-        use calamine::{open_workbook, Error, Reader, Xlsx};
+        use calamine_styles::{open_workbook, Error, Reader, Xlsx};
 
         fn main() -> Result<(), Error> {
             let test_file = "somefile.xlsx";
@@ -78,8 +78,8 @@ body:
     description: |
       Add any relevant version or system information:
     value: |
-        - calamine version:
-        - Cargo.toml dependency line for calamine:
+        - calamine-styles version:
+        - Cargo.toml dependency line for calamine-styles:
         - rustc version:
         - Excel/OpenOffice/LibreOffice version:
         - OS:

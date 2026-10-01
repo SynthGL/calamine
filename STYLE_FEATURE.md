@@ -11,7 +11,7 @@ formatting, and `worksheet_range()` separately when you also need values.
 ## Reading worksheet styles
 
 ```rust,no_run
-use calamine::{open_workbook, Xlsx};
+use calamine_styles::{open_workbook, Xlsx};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut workbook: Xlsx<_> = open_workbook("file.xlsx")?;
@@ -49,7 +49,7 @@ for sparse gaps.
 ## Inspecting a style
 
 ```rust,no_run
-use calamine::{open_workbook, HorizontalAlignment, Xlsx};
+use calamine_styles::{open_workbook, HorizontalAlignment, Xlsx};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut workbook: Xlsx<_> = open_workbook("file.xlsx")?;
@@ -122,7 +122,7 @@ not be interpreted as `General`.
 `StyleRange::get((row, column))` takes coordinates relative to the range start:
 
 ```rust,no_run
-use calamine::{open_workbook, Xlsx};
+use calamine_styles::{open_workbook, Xlsx};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut workbook: Xlsx<_> = open_workbook("file.xlsx")?;

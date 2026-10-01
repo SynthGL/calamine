@@ -5,6 +5,27 @@ This is the changelog/release notes for the `calamine` crate.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- Upgrade `quick-xml` to `^0.42` while retaining `zip ^7.0` and the existing
+  `Style` and `StyleRange` APIs. The minimum supported Rust version is now 1.86.
+- Expose the library as `calamine_styles`, matching the published
+  `calamine-styles` package. Update examples, tests, and documentation to use
+  that crate name directly.
+
+### Fixed
+
+- Transcode non-UTF-8 ODS, XLSB relationship, and XLSX XML parts through
+  `DecodingReader` before parsing their UTF-8 events, names, and attributes.
+  Select declared legacy encodings before the decoder validates its initial
+  prefix, including short XML parts and declarations spanning input buffers.
+- Preserve complete text and formulas across text, named/numeric entity, and
+  CDATA events, including non-ASCII cell values, font names, and attributes.
+- Decode Excel character escapes after assembling shared and inline string
+  text, so an escape split across XML events is not lost.
+
 ## [0.33.0] - 2026-02-04
 
 ### Added

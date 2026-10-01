@@ -6,7 +6,7 @@
 
 extern crate test;
 
-use calamine::{open_workbook, Ods, Reader, Xls, Xlsb, Xlsx};
+use calamine_styles::{open_workbook, Ods, Reader, Xls, Xlsb, Xlsx};
 use std::fs::File;
 use std::io::BufReader;
 use test::Bencher;

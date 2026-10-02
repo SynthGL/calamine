@@ -323,6 +323,33 @@ struct Xti {
     _itab_last: i16,
 }
 
+fn parse_extern_sheet(data: &[u8], xtis: &mut Vec<Xti>) -> Result<(), XlsError> {
+    // ExternSheet stores a two-byte count followed by six-byte XTI entries.
+    // Reject incomplete entries before indexing or appending any of them.
+    if data.len() < 2 {
+        return Err(XlsError::Len {
+            expected: 2,
+            found: data.len(),
+            typ: "ExternSheet",
+        });
+    }
+    let cxti = read_u16(data) as usize;
+    let expected = 2 + 6 * cxti;
+    if data.len() < expected {
+        return Err(XlsError::Len {
+            expected,
+            found: data.len(),
+            typ: "ExternSheet",
+        });
+    }
+    xtis.extend(data[2..expected].chunks_exact(6).map(|xti| Xti {
+        _isup_book: read_u16(&xti[..2]),
+        itab_first: read_i16(&xti[2..4]),
+        _itab_last: read_i16(&xti[4..]),
+    }));
+    Ok(())
+}
+
 impl<RS: Read + Seek> Xls<RS> {
     fn parse_workbook(&mut self) -> Result<(), XlsError> {
         // gets workbook and worksheets stream, or early exit
@@ -401,12 +428,7 @@ impl<RS: Read + Seek> Xls<RS> {
                     }
                     0x0017 => {
                         // ExternSheet
-                        let cxti = read_u16(r.data) as usize;
-                        xtis.extend(r.data[2..].chunks(6).take(cxti).map(|xti| Xti {
-                            _isup_book: read_u16(&xti[..2]),
-                            itab_first: read_i16(&xti[2..4]),
-                            _itab_last: read_i16(&xti[4..]),
-                        }));
+                        parse_extern_sheet(r.data, &mut xtis)?;
                     }
                     0x00FC => strings = parse_sst(&mut r, &encoding)?, // SST
                     #[cfg(feature = "picture")]
@@ -1422,11 +1444,10 @@ fn parse_formula(
                     }
                     _ => {
                         let iftab = read_u16(rgce) as usize;
-                        if iftab > crate::utils::FTAB_LEN {
-                            return Err(XlsError::IfTab(iftab));
-                        }
                         rgce = &rgce[2..];
-                        let argc = crate::utils::FTAB_ARGC[iftab] as usize;
+                        let argc = *crate::utils::FTAB_ARGC
+                            .get(iftab)
+                            .ok_or(XlsError::IfTab(iftab))? as usize;
                         (iftab, argc)
                     }
                 };
@@ -1457,7 +1478,11 @@ fn parse_formula(
                     formula.push(')');
                 } else {
                     stack.push(formula.len());
-                    formula.push_str(crate::utils::FTAB[iftab]);
+                    formula.push_str(
+                        crate::utils::FTAB
+                            .get(iftab)
+                            .ok_or(XlsError::IfTab(iftab))?,
+                    );
                     formula.push_str("()");
                 }
             }
@@ -1687,5 +1712,60 @@ mod tests {
     fn test_parse_string() {
         let enc = XlsEncoding::from_codepage(1252).unwrap();
         parse_string(&[0, 1], &enc, Biff::Biff8).unwrap_err();
+    }
+
+    #[test]
+    fn test_extern_sheet_truncated() {
+        let data = [2, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0];
+        for found in 0..data.len() {
+            let expected = if found < 2 { 2 } else { data.len() };
+            assert!(matches!(
+                parse_extern_sheet(&data[..found], &mut Vec::new()),
+                Err(XlsError::Len {
+                    expected: actual_expected,
+                    found: actual_found,
+                    typ: "ExternSheet",
+                }) if actual_expected == expected && actual_found == found
+            ));
+        }
+    }
+
+    #[test]
+    fn test_extern_sheet_complete() {
+        let mut xtis = Vec::new();
+        // A second record appends entries; only the declared count is consumed.
+        parse_extern_sheet(&[1, 0, 1, 0, 2, 0, 3, 0, 0xff], &mut xtis).unwrap();
+        parse_extern_sheet(&[1, 0, 4, 0, 0xff, 0xff, 6, 0], &mut xtis).unwrap();
+        assert_eq!(
+            xtis.iter()
+                .map(|xti| (xti._isup_book, xti.itab_first, xti._itab_last))
+                .collect::<Vec<_>>(),
+            [(1, 2, 3), (4, -1, 6)]
+        );
+    }
+
+    #[test]
+    fn test_formula_invalid_function_index() {
+        let enc = XlsEncoding::from_codepage(1252).unwrap();
+        for ptg in [0x22, 0x42, 0x62] {
+            for iftab in [crate::utils::FTAB_LEN as u16, 32931, u16::MAX] {
+                let [lo, hi] = iftab.to_le_bytes();
+                assert!(matches!(
+                    parse_formula(&[4, 0, ptg, 0, lo, hi], &[], &[], &[], &enc),
+                    Err(XlsError::IfTab(index)) if index == iftab as usize
+                ));
+            }
+        }
+        for ptg in [0x21, 0x41, 0x61] {
+            let [lo, hi] = (crate::utils::FTAB_LEN as u16).to_le_bytes();
+            assert!(matches!(
+                parse_formula(&[3, 0, ptg, lo, hi], &[], &[], &[], &enc),
+                Err(XlsError::IfTab(index)) if index == crate::utils::FTAB_LEN
+            ));
+        }
+        assert_eq!(
+            parse_formula(&[4, 0, 0x22, 0, 19, 0], &[], &[], &[], &enc).unwrap(),
+            "PI()"
+        );
     }
 }

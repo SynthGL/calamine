@@ -1,6 +1,6 @@
 [package]
 name = "calamine-styles"
-version = "0.1.0"
+version = "0.2.0"
 authors = [
     "Johann Tuffe <tafia973@gmail.com>",
     "Wolfgang Schoenberger",

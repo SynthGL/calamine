@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [calamine-styles 0.2.0] - 2026-10-14
+
 ### Changed
 
 - Upgrade `quick-xml` to `^0.42` and `zip` to `~8.6` while retaining the existing

@@ -94,7 +94,7 @@ fn resolve_workbook_relationship_target(target: &str) -> Result<String, XlsxErro
 }
 
 fn zip_contains_path<RS: Read + Seek>(zip: &ZipArchive<RS>, path: &str) -> bool {
-    zip.file_names().any(|zip_path| {
+    zip.file_names().flatten().any(|zip_path| {
         let normalized_path = zip_path.replace('\\', "/");
         path.eq_ignore_ascii_case(&normalized_path)
     })
@@ -3562,7 +3562,7 @@ pub(crate) fn column_number_to_name(num: u32, buf: &mut Vec<u8>) -> Result<(), X
 // the equivalent path/filename in the zip file. The file name in the zip file
 // may be a case-insensitive version of the target path and may use backslashes.
 pub(crate) fn path_to_zip_path<RS: Read + Seek>(zip: &ZipArchive<RS>, path: &str) -> String {
-    for zip_path in zip.file_names() {
+    for zip_path in zip.file_names().flatten() {
         let normalized_path = zip_path.replace('\\', "/");
 
         if path.eq_ignore_ascii_case(&normalized_path) {
